@@ -42,7 +42,7 @@ If you want to use OpenAI or other LLMs, set your API keys in a `.env` file.
 ### 5. Populate the Knowledge Base 
 Run the setup script to download and index some papers:
 ```
-python examples/05_run_rag_agent.py setup
+python examples/05_run_true_agent.py setup
 ```
 
 ### 6. Run the Agentic System
