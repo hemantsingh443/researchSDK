@@ -6,4 +6,9 @@ python-dotenv
 chromadb
 sentence-transformers
 tiktoken
-tqdm
+tqdm 
+langchain
+langchain-openai
+langchainhub
+duckduckgo-search 
+langchain-community

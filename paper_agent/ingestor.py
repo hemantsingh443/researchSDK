@@ -2,13 +2,14 @@ import fitz
 import arxiv
 from .structures import Paper, Author
 from .extractor import Extractor
+from typing import Optional, Dict, Any
 
 class Ingestor:
     def __init__(self):
         self.extractor = Extractor(api_type="local")
         print("Ingestor initialized with a LOCAL AI Extractor.")
 
-    def load_from_pdf(self, file_path: str, source_metadata: dict = None) -> Paper:
+    def load_from_pdf(self, file_path: str, source_metadata: Optional[Dict[str, Any]] = None) -> Paper:
         """
         Loads a paper from a local PDF file and extracts metadata.
         Prioritizes provided source_metadata over LLM extraction.
@@ -22,7 +23,7 @@ class Ingestor:
         full_text = ""
         for page_num in range(len(doc)):
             page = doc.load_page(page_num)
-            full_text += page.get_text() + "\n"
+            full_text += page.get_text() + "\n"  # type: ignore[attr-defined]
         doc.close()
 
         paper_obj = Paper(paper_id=file_path, full_text=full_text)
