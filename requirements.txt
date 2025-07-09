@@ -1,0 +1,9 @@
+pydantic
+PyMuPDF
+openai
+arxiv
+python-dotenv
+chromadb
+sentence-transformers
+tiktoken
+tqdm
