@@ -1,4 +1,4 @@
-trying to build an Agentic SDK for research papers :)
+trying to build an Agentic SDK for research papers 
 
 ## for Testing
 
