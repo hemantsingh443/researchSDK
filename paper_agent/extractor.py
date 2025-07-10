@@ -13,7 +13,7 @@ class Extractor:
     Uses an LLM to extract structured information from a paper's text.
     Can be configured to use OpenAI's API or a local Ollama instance.
     """
-    def __init__(self, api_type: str = "local", model: str = "phi3:instruct"):
+    def __init__(self, api_type: str = "local", model: str = "llama3:8b-instruct-q4_K_M"):
         self.model = model
         if api_type == "openai":
             api_key = os.getenv("OPENAI_API_KEY")
@@ -95,3 +95,50 @@ class Extractor:
             if 'response' in locals():
                 print(f"Raw response: {response.choices[0].message.content}")
             return paper
+
+    def summarize_paper_text(self, paper_text: str, paper_title: str) -> str:
+        """
+        Uses an LLM to generate a concise summary of a paper's text.
+        
+        Args:
+            paper_text: The full text of the paper to summarize.
+            paper_title: The title of the paper, for context.
+
+        Returns:
+            A string containing the summary.
+        """
+        # Take a significant portion of the text for summarization, but not all
+        # to save on tokens for very long papers.
+        text_for_summary = paper_text[:25000]
+
+        prompt = f"""
+        You are a scientific summarization assistant. Your task is to provide a concise summary of the following research paper.
+        Focus on these key areas:
+        1.  **Problem:** What problem does the paper aim to solve?
+        2.  **Methodology:** What is the core approach or method proposed?
+        3.  **Key Findings:** What were the main results or conclusions?
+
+        Do not include your own opinions or any information not present in the text.
+
+        Paper Title: {paper_title}
+        ---
+        Paper Text:
+        {text_for_summary}
+        ---
+        
+        Please provide a summary based on the text.
+        """
+        
+        print(f"Sending request to LLM for summarization of '{paper_title}'...")
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2
+        )
+        summary = response.choices[0].message.content
+        if summary is None:
+            summary = ""
+        print("Summarization successful.")
+        return summary

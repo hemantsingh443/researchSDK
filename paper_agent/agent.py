@@ -1,11 +1,21 @@
 from langchain.agents import AgentExecutor, create_json_chat_agent
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
-from typing import List
+from typing import List 
+from langchain_neo4j import Neo4jGraph 
 
 from .knowledge_base import KnowledgeBase
 from .ingestor import Ingestor
-from .tools import KnowledgeBaseQueryTool, ArxivSearchTool, web_search_tool
+from .tools import (
+    PaperFinderTool,         # <-- NEW
+    QuestionAnsweringTool,   # <-- NEW
+    ArxivSearchTool,
+    ArxivFetchTool,
+    PaperSummarizationTool,
+    web_search_tool,
+    GraphQueryTool,          # <-- IMPORT NEW TOOL
+)
+from .extractor import Extractor
 
 ROBUST_JSON_PROMPT_TEMPLATE = """
 You are a helpful scientific research assistant. Your goal is to answer the user's question by thinking step-by-step.
@@ -16,22 +26,100 @@ You have access to the following tools:
 
 The available tool names are: {tool_names}
 
-Here are some rules to follow:
+Here are some important rules to follow:
 1. After using a tool and getting an Observation, THINK about whether you have enough information to answer the user's question.
 2. If the user asks you to find or load papers, your job is done once you have successfully used the 'arxiv_paper_search_and_load_tool'. Your final answer should just confirm that the papers were loaded.
-3. Do not get stuck in a loop. If a tool is not giving you the information you need, try a different tool or conclude that you cannot answer the question.
-4. Once you have a satisfactory answer, you MUST provide the final answer to the user in the specified format.
+3. The 'paper_summarization_tool' and 'arxiv_fetch_by_id_tool' require a unique 'paper_id'. The 'paper_id' can be found in the 'Source Metadata' from the 'paper_finder_tool'. You MUST extract the 'paper_id' from the metadata and use it as the input for these tools. Do NOT use the paper's title as the ID.
+4. **CRITICAL RULE: When matching on string properties like 'title' in a Cypher query, ALWAYS use a case-insensitive search with 'toLower()' and 'CONTAINS'. For example: `WHERE toLower(p.title) CONTAINS 'attention'`. Do NOT use '=' for string matching.**
+5. When using a tool, ALWAYS provide ALL required arguments, using the EXACT argument names as specified in the tool's description/schema. Never invent argument names. If you are unsure, check the tool's schema.
+6. Do not get stuck in a loop. If a tool is not giving you the information you need, try a different tool or conclude that you cannot answer the question.
+7. Once you have a satisfactory answer, you MUST provide the final answer to the user in the specified format.
+8. Never call paper_summarization_tool or arxiv_fetch_by_id_tool with a null or missing paper_id. Always extract a valid string value from the metadata. If you cannot find a valid paper_id, do not call the tool and consider using another tool or asking the user for clarification.
+9. If, after 2 or 3 tool uses, you cannot find a direct answer to the user's question, provide a best-effort summary of what you did find, or explicitly state that the answer is not available in the knowledge base. Always provide a final answer, even if it is "I could not find an answer to your question in the current knowledge base."
+10. For questions about authors, collaborations, or relationships between papers (e.g., 'Who wrote X?', 'Who collaborated with Y?', 'What papers cite Z?'), always use the graph_query_tool. Do not use paper_finder_tool for these questions.
+11. When you receive a JSON list of papers from paper_finder_tool, extract the paper_id from the first paper and use it as input to paper_summarization_tool.
 
-Use the following format:
+Use the following format for each step:
 
 Thought: The user's question is about X. I should use tool Y to find the answer.
 Action:
 ```json
 {{
   "action": "tool_name",
-  "action_input": "the input for the tool"
+  "action_input": {{"argument_name": "argument value"}}
 }}
 ```
+
+# Examples (always use the exact argument names from the tool schema):
+
+## paper_finder_tool (requires 'query' argument, not for author/collaboration questions):
+```json
+{{
+  "action": "paper_finder_tool",
+  "action_input": {{"query": "Attention is All You Need"}}
+}}
+```
+
+## question_answering_tool (requires 'question' argument):
+```json
+{{
+  "action": "question_answering_tool",
+  "action_input": {{"question": "What is Mixture of Experts?"}}
+}}
+```
+
+## arxiv_paper_search_and_load_tool (requires 'query' and optionally 'max_results'):
+```json
+{{
+  "action": "arxiv_paper_search_and_load_tool",
+  "action_input": {{"query": "Mixture of Experts", "max_results": 5}}
+}}
+```
+
+## graph_query_tool (for author/collaboration/relationship questions):
+```json
+{{
+  "action": "graph_query_tool",
+  "action_input": {{"query": "MATCH (p:Paper)<-[:AUTHORED]-(a:Author) WHERE toLower(p.title) CONTAINS 'attention' RETURN a.name AS author LIMIT 10"}}
+}}
+```
+
+## paper summarization chain example:
+Thought: The user wants a summary of a specific paper. I should use paper_finder_tool to get the paper_id.
+Action:
+```json
+{{
+  "action": "paper_finder_tool",
+  "action_input": {{"query": "Attention is All You Need"}}
+}}
+```
+Observation: {{"papers": [{{"paper_id": "attention.pdf", "title": "Attention Is All You Need", "authors": "..."}}]}}
+Thought: I have found the paper_id. I should now use paper_summarization_tool with this paper_id.
+Action:
+```json
+{{
+  "action": "paper_summarization_tool",
+  "action_input": {{"paper_id": "attention.pdf"}}
+}}
+```
+Observation: "This paper introduces the Transformer architecture, which relies entirely on attention mechanisms..."
+Thought: I have gathered enough information. I will now provide the final answer.
+Action:
+```json
+{{
+  "action": "Final Answer",
+  "action_input": "Summary of 'Attention Is All You Need': This paper introduces the Transformer architecture, which relies entirely on attention mechanisms..."
+}}
+```
+
+// INCORRECT: Do NOT do this!
+```json
+{{
+  "action": "paper_summarization_tool",
+  "action_input": {{"paper_id": null}}
+}}
+```
+
 Observation: The result from using the tool.
 ... (this Thought/Action/Observation can repeat)
 Thought: I have gathered enough information. I will now provide the final answer.
@@ -52,7 +140,7 @@ class PaperAgent:
     An agentic system that can reason and use a suite of tools
     to accomplish complex research tasks.
     """
-    def __init__(self, db_path: str = "./paper_db"):
+    def __init__(self, db_path: str = "./paper_db", neo4j_uri = "neo4j://172.20.128.55:7687", neo4j_user="neo4j", neo4j_password="password"):
         """
         Initializes the agent, its tools, and the agent executor.
         """
@@ -69,18 +157,27 @@ class PaperAgent:
 
         # 2. Initialize our core components
         self.ingestor = Ingestor()
-        self.kb = KnowledgeBase(db_path=db_path)
+        # The KnowledgeBase now takes the Neo4j credentials
+        self.kb = KnowledgeBase(db_path=db_path, neo4j_uri=neo4j_uri, neo4j_user=neo4j_user, neo4j_password=neo4j_password)
+        self.extractor = Extractor(api_type="local", model=llm.model_name)
         
+        # --- NEW: Initialize the Neo4jGraph utility ---
+        graph = Neo4jGraph(url=neo4j_uri, username=neo4j_user, password=neo4j_password)
+
         # 3. Create the RAG "sub-agent" for the KB tool
         # This feels a bit circular, but it's a clean way to reuse our RAG logic
         # We create a temporary RAG agent to pass to the tool.
         rag_sub_agent = self._create_rag_pipeline(llm)
 
-        # 4. Initialize the tool suite
+        # 4. Initialize the tool suite, including the new graph tool
         self.tools = [
             web_search_tool,
-            KnowledgeBaseQueryTool(rag_agent=rag_sub_agent),
-            ArxivSearchTool(ingestor=self.ingestor, kb=self.kb)
+            PaperFinderTool(kb=self.kb), # <-- The "dumb" finder tool
+            QuestionAnsweringTool(rag_agent=rag_sub_agent), # <-- The "smart" RAG tool
+            GraphQueryTool(graph=graph), # <-- ADD NEW TOOL
+            ArxivSearchTool(ingestor=self.ingestor, kb=self.kb),
+            ArxivFetchTool(ingestor=self.ingestor, kb=self.kb),
+            PaperSummarizationTool(kb=self.kb, extractor=self.extractor)
         ]
         tool_names = ", ".join([str(t.name) for t in self.tools if t.name])
         print(f"Tools Initialized: [{tool_names}]")
@@ -92,17 +189,20 @@ class PaperAgent:
         self.agent_executor = AgentExecutor(
             agent=agent,
             tools=self.tools,
-            verbose=True, # Set to True to see the agent's thoughts!
-            handle_parsing_errors=True, # Crucial for local models
-            max_iterations=5 # <-- IMPORTANT GUARDRAIL
+            verbose=True,
+            handle_parsing_errors=True,
+            max_iterations=3, # <-- Let's reduce this slightly
+            # --- THE FINAL FIX ---
+            # This tells the agent that if the LLM outputs something that isn't a tool
+            # or a final answer, just return that output directly. This stops loops.
+            return_intermediate_steps=False,
+            early_stopping_method="force"
         )
         print("--- Agentic System Ready ---")
 
 
     def _create_rag_pipeline(self, llm):
         """Helper to create a temporary object to pass to the KB tool."""
-        # This is a bit of a hack to reuse our previous RAG logic
-        # without a full refactor.
         class TempRAGAgent:
             def __init__(self, kb, llm_client, model_name):
                 self.kb = kb
@@ -110,14 +210,19 @@ class PaperAgent:
                 self.model = model_name
             
             def run_query(self, user_query):
-                # This is the RAG logic from our old agent.py
                 context_str = ""
                 search_results = self.kb.search(query=user_query, n_results=3)
-                for i, doc in enumerate(search_results['documents'][0]):
-                    source = search_results['metadatas'][0][i]['title']
-                    context_str += f"--- Context Snippet {i+1} (from paper: {source}) ---\n{doc}\n\n"
                 
-                prompt = f"Answer the user's question based ONLY on the provided context:\n<context>\n{context_str}\n</context>\n\nQuestion: {user_query}"
+                # --- THE TWEAK ---
+                # Add the metadata, including the crucial paper_id, to the context string.
+                for i in range(len(search_results['ids'][0])):
+                    doc = search_results['documents'][0][i]
+                    meta = search_results['metadatas'][0][i]
+                    context_str += f"--- Context Snippet {i+1} ---\n"
+                    context_str += f"Source Metadata: {meta}\n" # <-- ADD THIS LINE
+                    context_str += f"Content: {doc}\n\n"
+                
+                prompt = f"Answer the user's question based ONLY on the provided context, which includes metadata and content for each snippet:\n<context>\n{context_str}\n</context>\n\nQuestion: {user_query}"
                 response = self.llm.invoke(prompt)
                 return response.content
         

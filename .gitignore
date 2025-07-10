@@ -3,6 +3,8 @@ paper_agent.egg-info/
 __pycache__/
 .env
 paper_db/ 
+attention.pdf
+
 
 
 
