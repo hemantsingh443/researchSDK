@@ -7,15 +7,19 @@ from langchain_neo4j import Neo4jGraph
 from .knowledge_base import KnowledgeBase
 from .ingestor import Ingestor
 from .tools import (
-    PaperFinderTool,         # <-- NEW
-    QuestionAnsweringTool,   # <-- NEW
+    PaperFinderTool,        
+    QuestionAnsweringTool,   
     ArxivSearchTool,
     ArxivFetchTool,
     PaperSummarizationTool,
     web_search_tool,
-    GraphQueryTool,          # <-- IMPORT NEW TOOL
+    GraphQueryTool,         
 )
 from .extractor import Extractor
+from langchain_google_genai import ChatGoogleGenerativeAI # <-- NEW IMPORT
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
 ROBUST_JSON_PROMPT_TEMPLATE = """
 You are a helpful scientific research assistant. Your goal is to answer the user's question by thinking step-by-step.
@@ -140,26 +144,38 @@ class PaperAgent:
     An agentic system that can reason and use a suite of tools
     to accomplish complex research tasks.
     """
-    def __init__(self, db_path: str = "./paper_db", neo4j_uri = "neo4j://172.20.128.55:7687", neo4j_user="neo4j", neo4j_password="password"):
+    def __init__(self, db_path: str = "./paper_db", llm_provider: str = "google", neo4j_uri = "neo4j://172.20.128.55:7687", neo4j_user="neo4j", neo4j_password="password"):
         """
         Initializes the agent, its tools, and the agent executor.
         """
         print("--- Initializing Agentic System ---")
 
-        # 1. Initialize the LLM (we'll use LangChain's wrapper)
-        # This points to our local Ollama server
-        llm = ChatOpenAI(
-            base_url='http://localhost:11434/v1',
-            model='llama3:8b-instruct-q4_K_M',
-            temperature=0.0
-        )
-        print(f"LLM Initialized: {llm.model_name}")
+        # 1. Initialize the LLM based on the provider
+        if llm_provider == "google":
+            if not os.getenv("GOOGLE_API_KEY"):
+                raise ValueError("GOOGLE_API_KEY not found in environment variables.")
+            llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", temperature=0.1)
+        elif llm_provider == "local":
+            llm = ChatOpenAI(
+                base_url='http://localhost:11434/v1',
+                model='llama3:8b-instruct-q4_K_M',
+                temperature=0.0
+            )
+        else:
+            raise ValueError(f"Unsupported LLM provider: {llm_provider}")
+        print(f"LLM Initialized: {getattr(llm, 'model', 'unknown')}")
 
         # 2. Initialize our core components
         self.ingestor = Ingestor()
         # The KnowledgeBase now takes the Neo4j credentials
         self.kb = KnowledgeBase(db_path=db_path, neo4j_uri=neo4j_uri, neo4j_user=neo4j_user, neo4j_password=neo4j_password)
-        self.extractor = Extractor(api_type="local", model=llm.model_name)
+        if llm_provider == "google":
+            extractor_model = "gemini-1.5-flash-latest"
+            extractor_api_type = "google"
+        else:
+            extractor_model = "llama3:8b-instruct-q4_K_M"
+            extractor_api_type = "local"
+        self.extractor = Extractor(api_type=extractor_api_type, model=extractor_model)
         
         # --- NEW: Initialize the Neo4jGraph utility ---
         graph = Neo4jGraph(url=neo4j_uri, username=neo4j_user, password=neo4j_password)
@@ -226,7 +242,7 @@ class PaperAgent:
                 response = self.llm.invoke(prompt)
                 return response.content
         
-        return TempRAGAgent(self.kb, llm, llm.model_name)
+        return TempRAGAgent(self.kb, llm, getattr(llm, "model", "unknown"))
 
 
     def run(self, user_query: str):

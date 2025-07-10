@@ -6,14 +6,16 @@ class PlanningAgent:
     """
     A planning agent that deconstructs a complex goal into a sequence of
     executable steps, then uses an execution agent to perform each step.
+    Supports both Google Gemini (ChatGoogleGenerativeAI) and local Ollama (ChatOpenAI) LLMs.
+    Pass the correct LLM instance as planner_llm.
     """
-    def __init__(self, react_agent: ReActAgent, planner_llm: ChatOpenAI):
+    def __init__(self, react_agent: ReActAgent, planner_llm):
         """
         Initializes the Planning Agent.
 
         Args:
             react_agent: An instance of our existing ReAct agent, which will act as the executor.
-            planner_llm: An LLM to use for generating the plan.
+            planner_llm: An LLM to use for generating the plan. Can be ChatGoogleGenerativeAI or ChatOpenAI.
         """
         self.executor_agent = react_agent
         self.planner_llm = planner_llm

@@ -1,22 +1,16 @@
-# examples/08_run_planning_agent.py
-
 from paper_agent.agent import PaperAgent as ReActAgent
 from paper_agent.planner import PlanningAgent
 from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 import sys
 import os
 
 def run_planning_example():
-    # 1. Initialize the "worker bee" - our existing ReAct agent
-    react_agent = ReActAgent(db_path="./paper_db")
+    # 1. Initialize the "worker bee"  existing ReAct agent
+    react_agent = ReActAgent(db_path="./paper_db", llm_provider="google")
 
-    # 2. Initialize the "manager" LLM - this can be the same model
-    planner_llm = ChatOpenAI(
-        base_url='http://localhost:11434/v1',
-        api_key=None,
-        model='llama3:8b-instruct-q4_K_M',
-        temperature=0.0
-    )
+    # 2. Initialize the "manager" LLM - use Google Gemini
+    planner_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", temperature=0.1)
 
     # 3. Create the master Planning Agent
     planning_agent = PlanningAgent(react_agent=react_agent, planner_llm=planner_llm)

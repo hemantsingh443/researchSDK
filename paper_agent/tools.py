@@ -239,7 +239,7 @@ class GraphQueryTool(BaseTool):
         try:
             result = self.graph.query(query)
             
-            # --- THE FINAL FIX ---
+
             # Instead of returning the raw list, format it into a sentence.
             if not result:
                 return "No results found in the graph for that query."

@@ -1,5 +1,21 @@
 trying to build an Agentic SDK for research papers 
 
+## Setup and Configuration
+
+- By default, the SDK uses a local Ollama LLM (e.g., llama3) for all agentic and extraction tasks. No cloud API keys are required for local mode.
+- **Optional: Google Gemini Support**
+    - If you want to use Google Gemini (Gemini 1.5 Flash) as your LLM, set the `GOOGLE_API_KEY` environment variable (e.g., in your `.env` file) and pass `llm_provider='google'` when initializing your agent.
+    - Example `.env` entry:
+      ```
+      GOOGLE_API_KEY=your-google-api-key
+      ```
+    - Example agent initialization:
+      ```python
+      agent = PaperAgent(llm_provider="google")
+      ```
+    - If `llm_provider` is not set to `google`, the system will use your local Ollama model by default.
+- **Note:** OpenAI API keys are not required or supported. The SDK is designed for privacy and local-first workflows, with optional Gemini cloud support.
+
 ## for Testing
 
 ### 1. Set up the environment  
@@ -36,16 +52,14 @@ ollama pull llama3:8b-instruct-q4_K_M
 ```
 - Make sure Ollama is running on `http://localhost:11434`
 
-### 4. (Optional) Set up environment variables
-If you want to use OpenAI or other LLMs, set your API keys in a `.env` file.
 
-### 5. Populate the Knowledge Base 
+### 4. Populate the Knowledge Base 
 Run the setup script to download and index some papers:
 ```
 python examples/05_run_true_agent.py setup
 ```
 
-### 6. Run the Agentic System
+### 5. Run the Agentic System
 To launch the agent and ask questions (you would need to modify code script for different questions for now)
 ```
 python examples/05_run_true_agent.py
