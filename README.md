@@ -96,6 +96,17 @@ Action:
 
 - For author/collaboration queries, the agent uses the graph_query_tool directly.
 
+## PlanningAgent: Multi-Step Reasoning and State Management
+
+The `PlanningAgent` is an advanced orchestrator that enables the SDK to handle complex, multi-step research tasks. It works by:
+
+- **Decomposing complex queries:** Uses an LLM to break down a user's high-level request into a clear, numbered plan of simple steps, each mapped to a specific tool or action.
+- **Stateful execution:** Maintains a scratchpad (internal state) that tracks the results of each step, allowing information (like paper IDs or summaries) to be passed between steps.
+- **Step-by-step orchestration:** For each step, the agent injects the current scratchpad into the prompt, so the worker agent has memory of all prior results and can use them as needed.
+- **Final synthesis:** After all steps are complete, the agent uses the full scratchpad to generate a comprehensive, synthesized answer for the user.
+
+This approach enables robust tool chaining, variable passing, and reliable completion of complex research workflows (e.g., "Find two papers on X, summarize both, and compare their approaches").
+
 ## Dual Database Architecture: Vector Search and Graph Reasoning
 
 This SDK uses **two databases** for maximum research power:
