@@ -22,34 +22,47 @@ class PlanningAgent:
         print("PlanningAgent initialized. The 'manager' is ready.")
 
     def _create_plan(self, user_query: str) -> List[str]:
-        """Uses the LLM to create a step-by-step plan."""
+        """Uses the LLM to create a step-by-step plan by first reflecting on the available tools."""
         
-        # Get the names of the available tools from the executor agent
-        available_tools = ", ".join([t.name for t in self.executor_agent.tools])
+        # --- THE KEY UPGRADE: Create a detailed tool manifest for the planner ---
+        tool_manifest = ""
+        for tool in self.executor_agent.tools:
+            tool_manifest += f"Tool Name: {tool.name}\n"
+            tool_manifest += f"Tool Description: {tool.description}\n"
+            tool_manifest += f"Tool Arguments: {tool.args}\n\n"
 
-        # Let's improve the planning prompt to be more direct.
         prompt = f"""
-        Create a concise, step-by-step plan to accomplish the user's request.
-        User request: "{user_query}"
-        Available tools: [{available_tools}]
-        
-        The plan should be a numbered list of simple actions. Focus on efficiency.
-        For example:
-        1. Find 2 papers on 'Quantum Computing' using 'arxiv_paper_search_and_load_tool'.
-        2. Find the paper_id for the first paper using 'paper_finder_tool' with the paper's title.
-        3. Summarize the first paper using 'paper_summarization_tool' with its paper_id.
-        4. Repeat steps 2 and 3 for the second paper.
-        5. Synthesize the summaries into a final answer.
-        
-        Output ONLY the numbered list.
+        You are a hyper-efficient AI project planner. Your job is to create the SHORTEST POSSIBLE, most EFFICIENT step-by-step plan to accomplish the user's request.
+
+        **Analyze the following tools very carefully:**
+        ---
+        {tool_manifest}
+        ---
+
+        **Based on your analysis of the tools, create a plan to resolve the following user request:**
+        ---
+        User Request: "{user_query}"
+        ---
+
+        **Rules for creating the plan:**
+        1.  **Be Efficient:** Do not use a tool if a more direct tool exists. For example, to find authors, use the `graph_query_tool` directly instead of finding and summarizing papers first.
+        2.  **Chain Inputs:** Think about the outputs of each step. If a later step needs a 'paper_id', a previous step must use a tool like `paper_finder_tool` that provides it.
+        3.  **Simple Steps:** Each step in the plan must be a simple, single instruction for the worker agent.
+
+        Your final output must be ONLY the numbered list of steps. Do not add any other text.
         """
         
-        print("\n--- Generating Plan ---")
+        print("\n--- Generating Plan (with reflection) ---")
         response = self.planner_llm.invoke(prompt)
         plan_str = response.content
-        if isinstance(plan_str, list):
-            plan_str = "\n".join(str(item) for item in plan_str)
-        plan = [step.strip().split('. ', 1)[1] for step in plan_str.split('\n') if step.strip() and step[0].isdigit()]
+        
+        # More robust parsing of the plan
+        plan = []
+        for line in plan_str.split('\n'):
+            line = line.strip()
+            if line and line[0].isdigit():
+                # Remove the leading number and period
+                plan.append(line.split('. ', 1)[1])
         
         print("--- Plan Created ---")
         for i, step in enumerate(plan):

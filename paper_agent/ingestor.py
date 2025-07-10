@@ -28,7 +28,6 @@ class Ingestor:
 
         paper_obj = Paper(paper_id=file_path, full_text=full_text)
 
-   
         if source_metadata:
             print("Using pre-fetched metadata from API.")
             paper_obj.title = source_metadata.get("title")
@@ -37,9 +36,10 @@ class Ingestor:
             paper_obj.paper_id = source_metadata.get("paper_id", file_path)
         else:
             print("No source metadata provided. Falling back to LLM extraction.")
-         
             paper_obj = self.extractor.extract_metadata(paper_obj)
-        
+
+        # --- NEW: Extract citations from the full text ---
+        paper_obj.citations = self.extractor.extract_citations(full_text)
         return paper_obj
 
     def load_from_arxiv(self, query: str, max_results: int = 3) -> list[Paper]:

@@ -161,3 +161,44 @@ class Extractor:
             summary = ""
         print("Summarization successful.")
         return summary
+
+    def extract_table_from_text(self, paper_text: str, paper_title: str, topic: str) -> str:
+        """Uses an LLM to find and convert a relevant table to Markdown format."""
+        prompt = f"""
+        From the text of the research paper titled '{paper_title}', find the most relevant table that discusses '{topic}'.
+        Your task is to extract this table and convert it into a clean, well-formatted Markdown table.
+        
+        If no relevant table is found, respond with "No relevant table found for the specified topic."
+
+        Here is the paper text:
+        ---
+        {paper_text[:30000]} 
+        ---
+        
+        Return ONLY the Markdown table.
+        """
+        print(f"Sending request to LLM for table extraction on topic: '{topic}'...")
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        if isinstance(self.client, ChatGoogleGenerativeAI):
+            response = self.client.invoke(prompt)
+            result = response.content if hasattr(response, 'content') else str(response)
+        else:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0
+            )
+            result = response.choices[0].message.content
+        # Ensure result is always a string
+        if not isinstance(result, str):
+            if isinstance(result, list):
+                result = "\n".join(str(item) for item in result)
+            else:
+                result = str(result)
+        if result is None:
+            result = ""
+        return result
+
+    def extract_citations(self, text: str) -> list[str]:
+        # TODO: Implement with LLM or regex
+        return []

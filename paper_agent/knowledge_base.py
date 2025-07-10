@@ -57,6 +57,18 @@ class KnowledgeBase:
                     MERGE (a)-[:AUTHORED]->(p)
                     """, author_name=author.name, paper_id=paper.paper_id)
 
+            # --- NEW: Add citation relationships ---
+            if hasattr(paper, 'citations') and paper.citations:
+                for cited_paper_title in paper.citations:
+                    # Create the cited paper node (it might not be in our DB yet)
+                    session.run("MERGE (cp:Paper {title: $title})", title=cited_paper_title)
+                    # Create the relationship
+                    session.run("""
+                        MATCH (p1:Paper {id: $paper_id})
+                        MATCH (p2:Paper {title: $cited_title})
+                        MERGE (p1)-[:CITES]->(p2)
+                        """, paper_id=paper.paper_id, cited_title=cited_paper_title)
+
     def _split_text_into_chunks(self, text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
         """
         Splits a long text into smaller, overlapping chunks.

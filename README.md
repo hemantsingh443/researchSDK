@@ -151,6 +151,34 @@ This SDK uses **two databases** for maximum research power:
 - When you ingest a paper (via the setup script or agent tools), it is added to both ChromaDB and Neo4j.
 - This ensures both semantic and structured queries are always up-to-date.
 
+## Advanced Features and Limitations
+
+### Agentic Workflow: Natural Language to Tool Chaining
+- You can issue complex research queries in plain English (e.g., "Compare the performance metrics reported in papers about 'Mixture of Experts'. Create a table and tell me which paper reported the highest accuracy.").
+- The planner and agent will automatically break down your query, select the right tools (e.g., paper finding, table extraction, plotting, relationship analysis), and chain them together.
+- **You do NOT need to specify tool calls in your prompt.** The system handles tool selection and chaining for you.
+
+### What Happens if Data is Missing?
+- If the agent cannot find the exact paper (e.g., "Attention is All You Need") or the required table/data, it will explain why the task cannot be completed, rather than failing silently.
+- This can happen if:
+  - The paper is not in arXiv or is not found by the search tool.
+  - The table or data you requested does not exist in the paper or is not extractable.
+
+### How to Improve Success
+- **Pre-load canonical papers:** Manually ingest important papers (e.g., "Attention is All You Need") into your knowledge base to ensure they are available for extraction and analysis.
+- **Improve paper matching:** Enhance the `paper_finder_tool` or planner logic to use fuzzy title matching, arXiv IDs, or allow user selection from a list of close matches.
+- **Handle ambiguous results:** If multiple papers are found, the agent can prompt for clarification or select the closest match.
+
+### Relationship Analysis
+- The agent can answer questions like "What is the relationship between the 'BERT' paper and the 'Attention is All You Need' paper?" by querying the knowledge graph and using the LLM to synthesize a clear explanation.
+- This works even if the papers were loaded from different sources, as long as citation relationships exist in the graph.
+
+### Troubleshooting
+- If a workflow fails, check the agent's output for explanations (e.g., "paper not found", "table not found").
+- For best results, ensure your knowledge base contains the papers and data you want to analyze.
+
+---
+
 ## Project Structure
 - `paper_agent/` - Core SDK modules (agent, tools, ingestor, knowledge base, etc.)
 - `examples/` - Example scripts for setup and running the agent

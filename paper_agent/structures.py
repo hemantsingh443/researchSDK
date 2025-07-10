@@ -18,6 +18,7 @@ class Paper(BaseModel):
     sections: Dict[str, str] = Field(default_factory=dict, description="Text broken down by section (e.g., Introduction)")
     tables: List[str] = Field(default_factory=list)
     figures: List[str] = Field(default_factory=list)
+    citations: List[str] = []
 
     def __repr__(self):
         return f"Paper(paper_id='{self.paper_id}', title='{self.title or 'N/A'}', authors={len(self.authors)})"

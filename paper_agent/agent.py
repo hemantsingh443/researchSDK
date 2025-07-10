@@ -14,12 +14,16 @@ from .tools import (
     PaperSummarizationTool,
     web_search_tool,
     GraphQueryTool,         
+    TableExtractionTool,    # <-- Import the new tool
+    RelationshipAnalysisTool, # <-- Import the relationship tool
+    PlotGenerationTool,     # <-- Import the plot tool
 )
 from .extractor import Extractor
 from langchain_google_genai import ChatGoogleGenerativeAI # <-- NEW IMPORT
 import os
 from dotenv import load_dotenv
 load_dotenv()
+from langchain_community.chat_models import ChatOllama
 
 ROBUST_JSON_PROMPT_TEMPLATE = """
 You are a helpful scientific research assistant. Your goal is to answer the user's question by thinking step-by-step.
@@ -156,9 +160,8 @@ class PaperAgent:
                 raise ValueError("GOOGLE_API_KEY not found in environment variables.")
             llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", temperature=0.1)
         elif llm_provider == "local":
-            llm = ChatOpenAI(
-                base_url='http://localhost:11434/v1',
-                model='llama3:8b-instruct-q4_K_M',
+            llm = ChatOllama(
+                model="llama3:8b-instruct-q4_K_M",
                 temperature=0.0
             )
         else:
@@ -193,7 +196,10 @@ class PaperAgent:
             GraphQueryTool(graph=graph), # <-- ADD NEW TOOL
             ArxivSearchTool(ingestor=self.ingestor, kb=self.kb),
             ArxivFetchTool(ingestor=self.ingestor, kb=self.kb),
-            PaperSummarizationTool(kb=self.kb, extractor=self.extractor)
+            PaperSummarizationTool(kb=self.kb, extractor=self.extractor),
+            TableExtractionTool(kb=self.kb, extractor=self.extractor),
+            RelationshipAnalysisTool(graph=graph, llm=llm),
+            PlotGenerationTool(),
         ]
         tool_names = ", ".join([str(t.name) for t in self.tools if t.name])
         print(f"Tools Initialized: [{tool_names}]")

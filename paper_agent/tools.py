@@ -4,6 +4,10 @@ from langchain.tools import BaseTool, DuckDuckGoSearchRun
 from typing import Type, Any
 from pydantic import BaseModel, Field
 
+import pandas as pd
+import matplotlib.pyplot as plt
+from io import StringIO
+
 from .knowledge_base import KnowledgeBase
 from .ingestor import Ingestor
 from .extractor import Extractor
@@ -269,3 +273,108 @@ class GraphQueryTool(BaseTool):
 
     async def _arun(self, query: str) -> str:
         raise NotImplementedError("This tool does not support async yet.")
+
+class TableExtractionInput(BaseModel):
+    paper_id: str = Field(description="The ID of the paper from which to extract tables.")
+    topic_of_interest: str = Field(description="The specific topic or type of data to look for in tables (e.g., 'model performance metrics', 'ablation study results').")
+
+class TableExtractionTool(BaseTool):
+    name: str = "table_extraction_tool"
+    description: str = (
+        "Use this tool to extract structured tabular data from a specific paper. "
+        "Provide the paper_id and a description of the data you are looking for."
+    )
+    args_schema: Type[TableExtractionInput] = TableExtractionInput
+    kb: KnowledgeBase
+    extractor: Extractor
+
+    def _run(self, paper_id: str, topic_of_interest: str) -> str:
+        # Fetch the paper text from the knowledge base
+        results = self.kb.collection.get(where={"paper_id": paper_id})
+        if not results or not results['documents']:
+            return f"Error: Could not find paper with ID {paper_id}."
+        
+        full_text = " ".join(results['documents'])
+        metadatas = results.get('metadatas')
+        if metadatas and len(metadatas) > 0:
+            raw_title = metadatas[0].get('title', 'Unknown Title')
+            title = str(raw_title) if raw_title is not None else 'Unknown Title'
+        else:
+            title = 'Unknown Title'
+
+        # Call a new method on our extractor
+        table_markdown = self.extractor.extract_table_from_text(full_text, title, topic_of_interest)
+        return table_markdown
+
+class RelationshipInput(BaseModel):
+    paper_a_title: str = Field(description="The title of the first paper.")
+    paper_b_title: str = Field(description="The title of the second paper.")
+
+class RelationshipAnalysisTool(BaseTool):
+    name: str = "relationship_analysis_tool"
+    description: str = (
+        "Use this tool to explain the relationship between two papers. "
+        "It queries the knowledge graph to find citation paths and other connections."
+    )
+    args_schema: Type[RelationshipInput] = RelationshipInput
+    graph: Neo4jGraph
+    llm: Any  # Accept any LLM with an .invoke method
+
+    def _run(self, paper_a_title: str, paper_b_title: str) -> str:
+        # A Cypher query to find the shortest path between two papers
+        cypher_query = f"""
+        MATCH (p1:Paper), (p2:Paper), path = shortestPath((p1)-[:CITES*]-(p2))
+        WHERE toLower(p1.title) CONTAINS toLower('{paper_a_title}')
+        AND toLower(p2.title) CONTAINS toLower('{paper_b_title}')
+        RETURN path
+        """
+        print(f"Running relationship query: {cypher_query}")
+        graph_data = str(self.graph.query(cypher_query))
+
+        if not graph_data or graph_data == '[]':
+            return "No direct citation path found between the two papers in the knowledge graph."
+
+        # Use an LLM to explain the path
+        synthesis_prompt = f"""
+        A user wants to know the relationship between '{paper_a_title}' and '{paper_b_title}'.
+        A knowledge graph query returned the following connection path:
+        ---
+        {graph_data}
+        ---
+        Based on this data, please explain the relationship in a clear, concise paragraph. For example, you might say 'Paper B cites Paper A' or 'Paper A and Paper B both cite a common paper C'.
+        """
+        response = self.llm.invoke(synthesis_prompt)
+        return response.content
+
+class PlottingInput(BaseModel):
+    markdown_table: str = Field(description="A table in Markdown format containing the data to plot.")
+    chart_type: str = Field(description="The type of chart to generate (e.g., 'bar', 'line').")
+    title: str = Field(description="The title for the chart.")
+    filename: str = Field(description="The filename to save the plot to (e.g., 'performance_chart.png').")
+
+class PlotGenerationTool(BaseTool):
+    name: str = "plot_generation_tool"
+    description: str = "Use this tool to generate a plot from a Markdown table and save it as an image file."
+    args_schema: Type[PlottingInput] = PlottingInput
+
+    def _run(self, markdown_table: str, chart_type: str, title: str, filename: str) -> str:
+        try:
+            # Convert markdown table to pandas DataFrame
+            data = StringIO(markdown_table.replace(' ', ''))
+            df = pd.read_csv(data, sep='|', index_col=1).dropna(axis=1, how='all').iloc[1:]
+            df.columns = [col.strip() for col in df.columns]
+
+            # Convert numeric columns to numeric types
+            for col in df.columns[1:]:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+            # Generate the plot
+            ax = df.plot(kind=chart_type, title=title, figsize=(10, 6))
+            plt.ylabel("Metric Value")
+            plt.xticks(rotation=45, ha='right')
+            plt.tight_layout()
+            plt.savefig(filename)
+            plt.close()
+            return f"Successfully generated and saved plot to '{filename}'."
+        except Exception as e:
+            return f"Error generating plot: {e}"
