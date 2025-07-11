@@ -1,13 +1,13 @@
 from langchain.agents import AgentExecutor, create_json_chat_agent
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
-from typing import List 
+from typing import List, Any
 from langchain_neo4j import Neo4jGraph 
 
 from .knowledge_base import KnowledgeBase
 from .ingestor import Ingestor
 from .tools import (
-    PaperFinderTool,        
+    GraphPaperFinderTool, # <-- THE NEW TOOL
     QuestionAnsweringTool,   
     ArxivSearchTool,
     ArxivFetchTool,
@@ -38,14 +38,15 @@ Here are some important rules to follow:
 1. After using a tool and getting an Observation, THINK about whether you have enough information to answer the user's question.
 2. If the user asks you to find or load papers, your job is done once you have successfully used the 'arxiv_paper_search_and_load_tool'. Your final answer should just confirm that the papers were loaded.
 3. The 'paper_summarization_tool' and 'arxiv_fetch_by_id_tool' require a unique 'paper_id'. The 'paper_id' can be found in the 'Source Metadata' from the 'paper_finder_tool'. You MUST extract the 'paper_id' from the metadata and use it as the input for these tools. Do NOT use the paper's title as the ID.
-4. **CRITICAL RULE: When matching on string properties like 'title' in a Cypher query, ALWAYS use a case-insensitive search with 'toLower()' and 'CONTAINS'. For example: `WHERE toLower(p.title) CONTAINS 'attention'`. Do NOT use '=' for string matching.**
-5. When using a tool, ALWAYS provide ALL required arguments, using the EXACT argument names as specified in the tool's description/schema. Never invent argument names. If you are unsure, check the tool's schema.
-6. Do not get stuck in a loop. If a tool is not giving you the information you need, try a different tool or conclude that you cannot answer the question.
-7. Once you have a satisfactory answer, you MUST provide the final answer to the user in the specified format.
-8. Never call paper_summarization_tool or arxiv_fetch_by_id_tool with a null or missing paper_id. Always extract a valid string value from the metadata. If you cannot find a valid paper_id, do not call the tool and consider using another tool or asking the user for clarification.
-9. If, after 2 or 3 tool uses, you cannot find a direct answer to the user's question, provide a best-effort summary of what you did find, or explicitly state that the answer is not available in the knowledge base. Always provide a final answer, even if it is "I could not find an answer to your question in the current knowledge base."
-10. For questions about authors, collaborations, or relationships between papers (e.g., 'Who wrote X?', 'Who collaborated with Y?', 'What papers cite Z?'), always use the graph_query_tool. Do not use paper_finder_tool for these questions.
-11. When you receive a JSON list of papers from paper_finder_tool, extract the paper_id from the first paper and use it as input to paper_summarization_tool.
+4. **Data Flow:** The 'table_extraction_tool' outputs structured JSON. The 'plot_generation_tool' takes this JSON as its 'json_data' input. Ensure your plan connects these tools correctly.
+5. **CRITICAL RULE: When matching on string properties like 'title' in a Cypher query, ALWAYS use a case-insensitive search with 'toLower()' and 'CONTAINS'. For example: `WHERE toLower(p.title) CONTAINS 'attention'`. Do NOT use '=' for string matching.**
+6. When using a tool, ALWAYS provide ALL required arguments, using the EXACT argument names as specified in the tool's description/schema. Never invent argument names. If you are unsure, check the tool's schema.
+7. Do not get stuck in a loop. If a tool is not giving you the information you need, try a different tool or conclude that you cannot answer the question.
+8. Once you have a satisfactory answer, you MUST provide the final answer to the user in the specified format.
+9. Never call paper_summarization_tool or arxiv_fetch_by_id_tool with a null or missing paper_id. Always extract a valid string value from the metadata. If you cannot find a valid paper_id, do not call the tool and consider using another tool or asking the user for clarification.
+10. If, after 2 or 3 tool uses, you cannot find a direct answer to the user's question, provide a best-effort summary of what you did find, or explicitly state that the answer is not available in the knowledge base. Always provide a final answer, even if it is "I could not find an answer to your question in the current knowledge base."
+11. For questions about authors, collaborations, or relationships between papers (e.g., 'Who wrote X?', 'Who collaborated with Y?', 'What papers cite Z?'), always use the graph_query_tool. Do not use paper_finder_tool for these questions.
+12. When you receive a JSON list of papers from paper_finder_tool, extract the paper_id from the first paper and use it as input to paper_summarization_tool.
 
 Use the following format for each step:
 
@@ -191,15 +192,15 @@ class PaperAgent:
         # 4. Initialize the tool suite, including the new graph tool
         self.tools = [
             web_search_tool,
-            PaperFinderTool(kb=self.kb), # <-- The "dumb" finder tool
+            GraphPaperFinderTool(graph=graph), # <-- REPLACE THE OLD FINDER, use class default description
             QuestionAnsweringTool(rag_agent=rag_sub_agent), # <-- The "smart" RAG tool
             GraphQueryTool(graph=graph), # <-- ADD NEW TOOL
             ArxivSearchTool(ingestor=self.ingestor, kb=self.kb),
-            ArxivFetchTool(ingestor=self.ingestor, kb=self.kb),
-            PaperSummarizationTool(kb=self.kb, extractor=self.extractor),
-            TableExtractionTool(kb=self.kb, extractor=self.extractor),
-            RelationshipAnalysisTool(graph=graph, llm=llm),
-            PlotGenerationTool(),
+            ArxivFetchTool(ingestor=self.ingestor, kb=self.kb, description="Fetches the full text and metadata for a given arXiv paper ID."),
+            PaperSummarizationTool(kb=self.kb, extractor=self.extractor, description="Summarizes a given scientific paper from the knowledge base."),
+            TableExtractionTool(kb=self.kb, extractor=self.extractor, description="Extracts tables from a given scientific paper in the knowledge base."),
+            RelationshipAnalysisTool(graph=graph, llm=llm, description="Analyzes relationships between scientific concepts or papers using the knowledge graph and LLM."),
+            PlotGenerationTool(description="Generates plots or visualizations from extracted data or paper content."),
         ]
         tool_names = ", ".join([str(t.name) for t in self.tools if t.name])
         print(f"Tools Initialized: [{tool_names}]")
@@ -252,9 +253,24 @@ class PaperAgent:
 
 
     def run(self, user_query: str):
-        """
-        Runs the agent with a user query.
-        """
-        print(f"\n--- Executing Agent with Query: '{user_query}' ---")
+        """Runs the full agentic loop for a single, simple task."""
+        print(f"\n--- Worker Agent Executing Task: '{user_query[:100]}...' ---")
         response = self.agent_executor.invoke({"input": user_query})
         return response
+
+    # --- NEW HELPER METHOD ---
+    def run_single_tool(self, tool_name: str, tool_input: Any) -> str:
+        """
+        Executes a single tool directly without the full agentic loop.
+        This is used by the MasterAgent to control the worker precisely.
+        """
+        if tool_name not in [tool.name for tool in self.tools]:
+            return f"Error: Tool '{tool_name}' not found."
+        try:
+            # Find the tool in our list
+            tool_to_run = next(t for t in self.tools if t.name == tool_name)
+            # Use the tool's .run() method directly
+            observation = tool_to_run.run(tool_input)
+            return str(observation)
+        except Exception as e:
+            return f"Error running tool '{tool_name}': {e}"

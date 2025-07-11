@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 import pandas as pd
 import matplotlib.pyplot as plt
 from io import StringIO
+import json # Make sure to import
 
 from .knowledge_base import KnowledgeBase
 from .ingestor import Ingestor
@@ -168,34 +169,41 @@ class ArxivFetchTool(BaseTool):
     async def _arun(self, paper_arxiv_id: str) -> str:
         raise NotImplementedError("This tool does not support async yet.")
 
-# --- NEW Tool for Finding Papers in the KB ---
+# --- THE NEW, SUPERIOR FINDER TOOL ---
 class PaperFinderInput(BaseModel):
-    """Input model for the Paper Finder Tool."""
+    """Input model for the Graph Paper Finder Tool."""
     query: str = Field(description="A query to find relevant papers, usually the title of the paper.")
 
-class PaperFinderTool(BaseTool):
-    """Finds papers in the knowledge base. Use this to get the 'paper_id' for other tools."""
-    name: str = "paper_finder_tool"
+class GraphPaperFinderTool(BaseTool):
+    """
+    Finds a specific paper in the knowledge graph by its title and returns ALL its metadata,
+    including its exact 'paper_id' (which could be an arXiv ID or a local path).
+    """
+    name: str = "graph_paper_finder_tool"
     description: str = (
-        "Use this tool to find a paper's 'paper_id'. This is a preliminary step for other tools "
-        "like the summarization tool. It returns raw metadata."
+        "Use this tool as the VERY FIRST STEP to find a paper's 'paper_id' and other metadata. "
+        "It performs an exact, case-insensitive search on the paper's title in the knowledge graph. "
+        "This is the most reliable way to find a specific paper that is already in the database."
     )
     args_schema: Type[PaperFinderInput] = PaperFinderInput
-    
-    kb: KnowledgeBase
+
+    graph: Neo4jGraph
 
     def _run(self, query: str) -> str:
         """Use the tool."""
-        import json
-        search_results = self.kb.search(query=query, n_results=3)
-        if not search_results['ids'][0]:
-            return json.dumps({"papers": []})
-        # Return the list of metadatas as a JSON string for easy parsing by the agent
-        return json.dumps({"papers": search_results['metadatas'][0]})
-
-    async def _arun(self, query: str) -> str:
-        raise NotImplementedError("This tool does not support async yet.")
-
+        cypher = """
+        MATCH (p:Paper)
+        WHERE toLower(p.title) CONTAINS toLower($query)
+        RETURN p.id as paper_id, p.title as title
+        LIMIT 5
+        """
+        try:
+            result = self.graph.query(cypher, params={"query": query})
+            if not result:
+                return f"No paper found in the Knowledge Graph with a title containing '{query}'."
+            return str(result)
+        except Exception as e:
+            return f"Error executing graph query: {e}"
 
 # --- NEW Tool for Answering Questions using RAG ---
 class QuestionAnsweringInput(BaseModel):
@@ -281,8 +289,8 @@ class TableExtractionInput(BaseModel):
 class TableExtractionTool(BaseTool):
     name: str = "table_extraction_tool"
     description: str = (
-        "Use this tool to extract structured tabular data from a specific paper. "
-        "Provide the paper_id and a description of the data you are looking for."
+        "Use this tool to extract structured tabular data from a paper. "
+        "It returns the data in a structured JSON format, NOT as a Markdown table."
     )
     args_schema: Type[TableExtractionInput] = TableExtractionInput
     kb: KnowledgeBase
@@ -302,9 +310,10 @@ class TableExtractionTool(BaseTool):
         else:
             title = 'Unknown Title'
 
-        # Call a new method on our extractor
-        table_markdown = self.extractor.extract_table_from_text(full_text, title, topic_of_interest)
-        return table_markdown
+        # --- NEW JSON OUTPUT LOGIC ---
+        # We call a modified extractor method
+        json_table = self.extractor.extract_table_as_json(full_text, title, topic_of_interest)
+        return json_table # Return the JSON string directly
 
 class RelationshipInput(BaseModel):
     paper_a_title: str = Field(description="The title of the first paper.")
@@ -347,30 +356,29 @@ class RelationshipAnalysisTool(BaseTool):
         return response.content
 
 class PlottingInput(BaseModel):
-    markdown_table: str = Field(description="A table in Markdown format containing the data to plot.")
+    # The input is now a JSON string, not markdown
+    json_data: str = Field(description="A JSON string containing the table data, with 'columns' and 'data' keys.")
     chart_type: str = Field(description="The type of chart to generate (e.g., 'bar', 'line').")
     title: str = Field(description="The title for the chart.")
     filename: str = Field(description="The filename to save the plot to (e.g., 'performance_chart.png').")
 
 class PlotGenerationTool(BaseTool):
     name: str = "plot_generation_tool"
-    description: str = "Use this tool to generate a plot from a Markdown table and save it as an image file."
+    description: str = "Use this tool to generate a plot from structured JSON data and save it as an image file."
     args_schema: Type[PlottingInput] = PlottingInput
 
-    def _run(self, markdown_table: str, chart_type: str, title: str, filename: str) -> str:
+    def _run(self, json_data: str, chart_type: str, title: str, filename: str) -> str:
         try:
-            # Convert markdown table to pandas DataFrame
-            data = StringIO(markdown_table.replace(' ', ''))
-            df = pd.read_csv(data, sep='|', index_col=1).dropna(axis=1, how='all').iloc[1:]
-            df.columns = [col.strip() for col in df.columns]
+            # Parse the structured JSON input
+            data = json.loads(json_data)
+            df = pd.DataFrame(data['data'], columns=data['columns'])
 
-            # Convert numeric columns to numeric types
-            for col in df.columns[1:]:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-            # Generate the plot
+            # Plotting logic is now much cleaner
+            # Assume the first column is the x-axis (index)
+            df.set_index(df.columns[0], inplace=True)
+            
             ax = df.plot(kind=chart_type, title=title, figsize=(10, 6))
-            plt.ylabel("Metric Value")
+            plt.ylabel("Value")
             plt.xticks(rotation=45, ha='right')
             plt.tight_layout()
             plt.savefig(filename)

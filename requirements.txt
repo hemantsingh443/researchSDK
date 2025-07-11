@@ -12,4 +12,5 @@ langchain-openai
 langchainhub
 duckduckgo-search 
 neo4j
-langchain-community
+langchain-community 
+matplotlib

@@ -199,6 +199,51 @@ class Extractor:
             result = ""
         return result
 
+    def extract_table_as_json(self, paper_text: str, paper_title: str, topic: str) -> str:
+        """Uses an LLM to find a table and convert it to a structured JSON string."""
+        prompt = f"""
+        From the research paper '{paper_title}', find the most relevant table discussing '{topic}'.
+        Your task is to extract this table and represent it as a JSON object.
+        The JSON should have two keys: "columns" (a list of column header strings) and "data" (a list of lists, where each inner list is a row of data).
+        Clean the data: ensure numerical values are numbers, not strings.
+
+        Example Output:
+        {{
+            "columns": ["Model", "BLEU Score", "Training Cost (FLOPs)"],
+            "data": [
+                ["Transformer (base)", 27.3, 3.3e18],
+                ["Transformer (big)", 28.4, 1.0e19]
+            ]
+        }}
+
+        Paper Text:
+        ---
+        {paper_text[:30000]}
+        ---
+        Return ONLY the valid JSON object.
+        """
+        print(f"Sending request to LLM for JSON table extraction on topic: '{topic}'...")
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        if isinstance(self.client, ChatGoogleGenerativeAI):
+            response = self.client.invoke(prompt)
+            result = response.content if hasattr(response, 'content') else str(response)
+        else:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                response_format={"type": "json_object"}
+            )
+            result = response.choices[0].message.content
+        if not isinstance(result, str):
+            if isinstance(result, list):
+                result = "\n".join(str(item) for item in result)
+            else:
+                result = str(result)
+        if result is None:
+            result = ""
+        return result
+
     def extract_citations(self, text: str) -> list[str]:
         # TODO: Implement with LLM or regex
         return []
