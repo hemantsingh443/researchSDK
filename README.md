@@ -1,77 +1,31 @@
-trying to build an Agentic SDK for research papers 
+# Paper Agent SDK
 
-## Setup and Configuration
+A scientific research assistant system that leverages LLMs, LangChain, Neo4j, and dynamic visualization tools to automate literature search, data extraction, and analysis from research papers.
 
-- By default, the SDK uses a local Ollama LLM (e.g., llama3) for all agentic and extraction tasks. No cloud API keys are required for local mode.
-- **Optional: Google Gemini Support**
-    - If you want to use Google Gemini (Gemini 1.5 Flash) as your LLM, set the `GOOGLE_API_KEY` environment variable (e.g., in your `.env` file) and pass `llm_provider='google'` when initializing your agent.
-    - Example `.env` entry:
-      ```
-      GOOGLE_API_KEY=your-google-api-key
-      ```
-    - Example agent initialization:
-      ```python
-      agent = PaperAgent(llm_provider="google")
-      ```
-    - If `llm_provider` is not set to `google`, the system will use your local Ollama model by default.
-- **Note:** OpenAI API keys are not required or supported. The SDK is designed for privacy and local-first workflows, with optional Gemini cloud support.
+---
 
-## for Testing
+## Features
+- **Automated paper search and ingestion** (arXiv, local, graph-based)
+- **Structured table extraction** from scientific papers
+- **Dynamic, LLM-driven data visualization** (bar, line, scatter, etc.)
+- **Relationship and citation analysis** via knowledge graph
+- **Robust error handling and fallback strategies**
 
-### 1. Set up the environment  
+---
 
-```
-python -m venv myenv 
-```
+## Quick Start
+1. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. **Set up Neo4j and vector DB as described in the docs.**
+3. **Ingest papers** (see `add_local_paper.py` or arXiv tools).
+4. **Run an example agentic workflow:**
+   ```bash
+   python examples/12_run_dynamic_viz.py
+   ```
 
-For Linux system or WSL:
-```
-source myenv/bin/activate
-```
-For Windows:
-```
-myenv\Scripts\activate
-```
-
-### 2. Install dependencies
-
-```
-pip install -r requirements.txt
-```
-
-You may also need to install system packages for PDF processing:
-```
-sudo apt-get update && sudo apt-get install -y build-essential python3-dev
-```
-
-### 3. Set up Ollama (for local LLM)
-- Download and install [Ollama](https://ollama.com/)
-- Pull a supported model (recommended: Llama 3):
-```
-ollama pull llama3:8b-instruct-q4_K_M
-```
-- Make sure Ollama is running on `http://localhost:11434`
-
-
-### 4. Populate the Knowledge Base 
-Run the setup script to download and index some papers:
-```
-python examples/05_run_true_agent.py setup
-```
-
-### 5. Run the Agentic System
-To launch the agent and ask questions (you would need to modify code script for different questions for now)
-```
-python examples/05_run_true_agent.py
-```
-
-
-## Example Usage
-
-- Ask a research question:
-  - "What are the main challenges of LLM agents?"
-- Add new papers to the knowledge base:
-  - "Find and load new papers about graph neural networks."
+---
 
 ## Example: Automated Visualization from Research Paper
 
@@ -89,128 +43,21 @@ Please do the following:
 
 **Resulting Visualizations:**
 
-- *BLEU Scores of Different Machine Translation Models*
+<p align="center">
+  <img src="bleu_comparison.png" alt="BLEU Score Comparison" width="400" style="display:inline-block; margin-right: 20px;"/>
+  <img src="cost_vs_performance.png" alt="Training Cost vs BLEU Score" width="400" style="display:inline-block;"/>
+</p>
 
-  ![BLEU Score Comparison](bleu_comparison.png)
-
-- *Relationship between Training Cost and BLEU Score*
-
-  ![Training Cost vs BLEU Score](cost_vs_performance.png)
-
-## How Tool Chaining Works
-
-- The agent can now reliably chain tools for multi-step tasks, such as summarizing a paper:
-  1. It uses `paper_finder_tool` to get the paper_id (returns `{ "paper_id": "attention.pdf" }`).
-  2. It immediately uses `paper_summarization_tool` with that paper_id.
-  3. The final answer is the summary.
-
-**Example summarization query:**
-
-User: "Please provide a summary of the 'Attention is All You Need' paper."
-
-Agent reasoning:
-```
-Thought: The user wants a summary. I should use paper_finder_tool to get the paper_id.
-Action:
-{
-  "action": "paper_finder_tool",
-  "action_input": {"query": "Attention is All You Need"}
-}
-Observation: {"paper_id": "attention.pdf"}
-Thought: I have the paper_id. I will now use paper_summarization_tool.
-Action:
-{
-  "action": "paper_summarization_tool",
-  "action_input": {"paper_id": "attention.pdf"}
-}
-Observation: "[summary text]"
-Thought: I have the summary. I will now provide the final answer.
-Action:
-{
-  "action": "Final Answer",
-  "action_input": "[summary text]"
-}
-```
-
-- For author/collaboration queries, the agent uses the graph_query_tool directly.
-
-## PlanningAgent: Multi-Step Reasoning and State Management
-
-The `PlanningAgent` is an advanced orchestrator that enables the SDK to handle complex, multi-step research tasks. It works by:
-
-- **Decomposing complex queries:** Uses an LLM to break down a user's high-level request into a clear, numbered plan of simple steps, each mapped to a specific tool or action.
-- **Stateful execution:** Maintains a scratchpad (internal state) that tracks the results of each step, allowing information (like paper IDs or summaries) to be passed between steps.
-- **Step-by-step orchestration:** For each step, the agent injects the current scratchpad into the prompt, so the worker agent has memory of all prior results and can use them as needed.
-- **Final synthesis:** After all steps are complete, the agent uses the full scratchpad to generate a comprehensive, synthesized answer for the user.
-
-This approach enables robust tool chaining, variable passing, and reliable completion of complex research workflows (e.g., "Find two papers on X, summarize both, and compare their approaches").
-
-## Dual Database Architecture: Vector Search and Graph Reasoning
-
-This SDK uses **two databases** for maximum research power:
-
-### 1. ChromaDB (Vector Store)
-- Used for semantic search and retrieval-augmented generation (RAG).
-- Stores paper content in vectorized chunks for fast similarity search.
-- Powers tools like `paper_finder_tool` and `question_answering_tool`.
-- Populated automatically when you ingest or add papers.
-
-### 2. Neo4j (Graph Database)
-- Used for structured queries about relationships: authors, collaborations, citations, etc.
-- Powers the `graph_query_tool` for Cypher queries (e.g., "Who wrote X?", "Who collaborated with Y?").
-- Populated automatically alongside ChromaDB when you ingest papers.
-
-### How the Agent Uses Both
-- **Semantic search:** Finds relevant papers using ChromaDB.
-- **Graph queries:** Answers author/collaboration/relationship questions using Neo4j.
-- **Chaining:** Finds a paper in ChromaDB, then uses its ID for graph or summarization queries.
-
-### Neo4j Setup
-- Download and install [Neo4j Community Edition](https://neo4j.com/download-center/#community)
-- Start Neo4j and ensure it is accessible (default: `bolt://localhost:7687`)
-- Set your Neo4j credentials in the agent config or environment variables if needed.
-- The agent will automatically create nodes for papers and authors, and relationships like `:AUTHORED`.
-
-### Populating Both Databases
-- When you ingest a paper (via the setup script or agent tools), it is added to both ChromaDB and Neo4j.
-- This ensures both semantic and structured queries are always up-to-date.
-
-## Advanced Features and Limitations
-
-### Agentic Workflow: Natural Language to Tool Chaining
-- You can issue complex research queries in plain English (e.g., "Compare the performance metrics reported in papers about 'Mixture of Experts'. Create a table and tell me which paper reported the highest accuracy.").
-- The planner and agent will automatically break down your query, select the right tools (e.g., paper finding, table extraction, plotting, relationship analysis), and chain them together.
-- **You do NOT need to specify tool calls in your prompt.** The system handles tool selection and chaining for you.
-
-### What Happens if Data is Missing?
-- If the agent cannot find the exact paper (e.g., "Attention is All You Need") or the required table/data, it will explain why the task cannot be completed, rather than failing silently.
-- This can happen if:
-  - The paper is not in arXiv or is not found by the search tool.
-  - The table or data you requested does not exist in the paper or is not extractable.
-
-### How to Improve Success
-- **Pre-load canonical papers:** Manually ingest important papers (e.g., "Attention is All You Need") into your knowledge base to ensure they are available for extraction and analysis.
-- **Improve paper matching:** Enhance the `paper_finder_tool` or planner logic to use fuzzy title matching, arXiv IDs, or allow user selection from a list of close matches.
-- **Handle ambiguous results:** If multiple papers are found, the agent can prompt for clarification or select the closest match.
-
-### Relationship Analysis
-- The agent can answer questions like "What is the relationship between the 'BERT' paper and the 'Attention is All You Need' paper?" by querying the knowledge graph and using the LLM to synthesize a clear explanation.
-- This works even if the papers were loaded from different sources, as long as citation relationships exist in the graph.
-
-### Troubleshooting
-- If a workflow fails, check the agent's output for explanations (e.g., "paper not found", "table not found").
-- For best results, ensure your knowledge base contains the papers and data you want to analyze.
+<p align="center">
+  <b>Left:</b> BLEU Scores of Different Machine Translation Models &nbsp;&nbsp;&nbsp; <b>Right:</b> Relationship between Training Cost and BLEU Score
+</p>
 
 ---
 
-## Project Structure
-- `paper_agent/` - Core SDK modules (agent, tools, ingestor, knowledge base, etc.)
-- `examples/` - Example scripts for setup and running the agent
-- `requirements.txt` - Python dependencies
+## Architecture & Tooling
+- See `agent_and_tools_overview.md` for a detailed breakdown of agents and tools.
+- Modular, extensible, and robust for real-world research workflows.
 
-## Troubleshooting
-- If the agent loops or fails to chain tools, ensure `paper_finder_tool` returns only `{ "paper_id": ... }` as a JSON string.
-- For LLM errors, check your Ollama/OpenAI/Groq setup and environment variables.
-- For local LLMs, Ollama is recommended and tested.
-- For graph queries, ensure Neo4j is running and accessible, and that papers/authors are ingested.
+---
+
 
