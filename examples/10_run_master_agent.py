@@ -1,5 +1,3 @@
-# examples/10_run_master_agent.py
-
 from paper_agent.agent import PaperAgent as WorkerAgent
 from paper_agent.master_agent import MasterAgent
 from langchain_google_genai import ChatGoogleGenerativeAI
