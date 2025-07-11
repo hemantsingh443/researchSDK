@@ -44,8 +44,8 @@ Please do the following:
 **Resulting Visualizations:**
 
 <p align="center">
-  <img src="bleu_comparison.png" alt="BLEU Score Comparison" width="400" style="display:inline-block; margin-right: 20px;"/>
-  <img src="cost_vs_performance.png" alt="Training Cost vs BLEU Score" width="400" style="display:inline-block;"/>
+  <img src="GeneratedGraph/bleu_comparison.png" alt="BLEU Score Comparison" width="400" style="display:inline-block; margin-right: 20px;"/>
+  <img src="GeneratedGraph/cost_vs_performance.png" alt="Training Cost vs BLEU Score" width="400" style="display:inline-block;"/>
 </p>
 
 <p align="center">
