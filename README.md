@@ -73,6 +73,30 @@ python examples/05_run_true_agent.py
 - Add new papers to the knowledge base:
   - "Find and load new papers about graph neural networks."
 
+## Example: Automated Visualization from Research Paper
+
+This system can extract quantitative results from scientific papers and generate insightful visualizations automatically. Below is an example using the prompt from `examples/12_run_dynamic_viz.py`:
+
+**Prompt:**
+```
+I need to understand the performance of models in the 'Attention is All You Need' paper.
+Please do the following:
+1. Extract the main results table that includes BLEU scores and Training Cost.
+2. From that data, create a visualization to **compare the BLEU scores** of the different models. Save it as 'bleu_comparison.png'.
+3. From the same data, create another visualization to show the **relationship between Training Cost and BLEU score**. Save it as 'cost_vs_performance.png'.
+4. Provide a final answer summarizing what the two charts show.
+```
+
+**Resulting Visualizations:**
+
+- *BLEU Scores of Different Machine Translation Models*
+
+  ![BLEU Score Comparison](bleu_comparison.png)
+
+- *Relationship between Training Cost and BLEU Score*
+
+  ![Training Cost vs BLEU Score](cost_vs_performance.png)
+
 ## How Tool Chaining Works
 
 - The agent can now reliably chain tools for multi-step tasks, such as summarizing a paper:

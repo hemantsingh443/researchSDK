@@ -105,15 +105,23 @@ class PlanningAgent:
 
         # Final synthesis step, now with a rich scratchpad of all results.
         final_synthesis_prompt = f"""
-        The plan is complete. The original request was: '{user_query}'
-        
-        Here is the full project scratchpad containing all results:
-        ---
-        {str(scratchpad)}
-        ---
-        
-        Synthesize all of this information into a final, comprehensive answer for the user.
-        """
+You are a brilliant scientific analyst and writer. The project to answer '{user_query}' is complete.
+Here is the full project scratchpad containing all the data, summaries, and artifacts you have generated:
+---
+{str(scratchpad)}
+---
+
+Your final task is to synthesize all of this information into a single, comprehensive, and insightful report for the user.
+
+**Structure your report as follows:**
+1.  **Executive Summary:** A single paragraph that directly answers the user's core request.
+2.  **Key Findings:** A bulleted list of the most important insights you discovered. This could include which model performed best, a key difference between two papers, or a surprising result from the data.
+3.  **Detailed Analysis:** A more in-depth explanation, incorporating the summaries and comparisons you made.
+4.  **Visualizations:** Reference any plots you created (e.g., "A visual comparison of performance is available in the chart 'rita_performance.png'.").
+5.  **Further Questions:** Based on your analysis, propose one or two interesting follow-up questions for future research.
+
+Write the report in clear, professional language.
+"""
         
         print("\n--- Generating Final Synthesis ---")
         final_answer = self.planner_llm.invoke(final_synthesis_prompt).content

@@ -1,4 +1,3 @@
-
 from langchain_neo4j import Neo4jGraph 
 from langchain.tools import BaseTool, DuckDuckGoSearchRun
 from typing import Type, Any
@@ -7,7 +6,10 @@ from pydantic import BaseModel, Field
 import pandas as pd
 import matplotlib.pyplot as plt
 from io import StringIO
-import json # Make sure to import
+import json 
+import numpy as np
+import os
+from langchain_core.language_models.chat_models import BaseChatModel # <-- NEW
 
 from .knowledge_base import KnowledgeBase
 from .ingestor import Ingestor
@@ -386,3 +388,188 @@ class PlotGenerationTool(BaseTool):
             return f"Successfully generated and saved plot to '{filename}'."
         except Exception as e:
             return f"Error generating plot: {e}"
+
+class SmartPlottingInput(BaseModel):
+    json_data: str = Field(description="A JSON string with 'columns' and 'data' keys.")
+    # The agent now decides the best chart type!
+    title: str = Field(description="The title for the chart.")
+    filename: str = Field(description="The filename to save the plot to (e.g., 'performance_chart.png').")
+    # A new field to guide the LLM
+    analysis_goal: str = Field(description="A short sentence describing what the plot should show or compare. E.g., 'Compare the error metrics (RMSE, MAE) of the models'.")
+
+class SmartPlotGenerationTool(BaseTool):
+    name: str = "smart_plot_generation_tool"
+    description: str = (
+        "An intelligent plotting tool. It takes structured JSON data and an analysis goal, "
+        "and automatically chooses the best way to visualize the data to meet that goal. "
+        "Use this to create insightful charts from extracted tables."
+    )
+    args_schema: Type[SmartPlottingInput] = SmartPlottingInput
+
+    def _run(self, json_data: str, title: str, filename: str, analysis_goal: str) -> str:
+        try:
+            data = json.loads(json_data)
+            df = pd.DataFrame(data['data'], columns=data['columns'])
+            df.set_index(df.columns[0], inplace=True)
+            
+            # --- THE NEW INTELLIGENCE ---
+            # Heuristic: If one column's values are much larger than the others,
+            # plot it on a secondary y-axis.
+            numeric_cols = df.select_dtypes(include=np.number).columns
+            if len(numeric_cols) > 1:
+                max_vals = df[numeric_cols].max()
+                # If the max of one column is > 10x the max of another...
+                if max_vals.max() / max_vals.min() > 10:
+                    # Plot the largest column on a secondary axis
+                    fig, ax1 = plt.subplots(figsize=(12, 7))
+                    ax2 = ax1.twinx() # Create a second y-axis
+                    
+                    largest_col = max_vals.idxmax()
+                    other_cols = [c for c in numeric_cols if c != largest_col]
+                    
+                    df[other_cols].plot(kind='bar', ax=ax1, position=0, width=0.4)
+                    df[[largest_col]].plot(kind='bar', ax=ax2, color='red', position=1, width=0.4)
+
+                    ax1.set_ylabel('Error Metrics')
+                    ax2.set_ylabel(largest_col, color='red')
+                    ax1.set_title(title)
+                    fig.legend(loc="upper right", bbox_to_anchor=(1,1), bbox_transform=ax1.transAxes)
+
+                else: # All values are on a similar scale
+                    df.plot(kind='bar', title=title, figsize=(10, 6), rot=45)
+            else: # Only one numeric column
+                df.plot(kind='bar', title=title, figsize=(10, 6), rot=45)
+            
+            plt.tight_layout()
+            plt.savefig(filename)
+            plt.close()
+            return f"Successfully generated an insightful plot and saved it to '{filename}'."
+
+        except Exception as e:
+            return f"Error generating smart plot: {e}"
+
+class DynamicVisualizationInput(BaseModel):
+    json_data: str = Field(description="A JSON string with 'columns' and 'data' keys, representing the data to be visualized.")
+    analysis_goal: str = Field(description="A clear, natural language description of what the visualization should show. E.g., 'Compare the performance of each model', 'Show the trend of training cost over time', 'Show the distribution of different model types'.")
+    filename: str = Field(description="The filename to save the plot to (e.g., 'visualization.png').")
+
+class DynamicVisualizationTool(BaseTool):
+    """
+    An advanced data visualization tool. It takes structured JSON data and a high-level goal,
+    and then generates and executes Python code to create the best possible visualization.
+    It can create bar charts, line plots, scatter plots, pie charts, and more.
+    """
+    name: str = "dynamic_visualization_tool"
+    description: str = (
+        "Use this tool to create insightful data visualizations from structured JSON data. "
+        "Provide the data and a clear goal for the analysis."
+    )
+    args_schema: Type[DynamicVisualizationInput] = DynamicVisualizationInput
+    
+    # This tool needs its own LLM to write the plotting code
+    code_writing_llm: BaseChatModel
+
+    def _generate_plotting_code(self, df_head: str, analysis_goal: str) -> str:
+        """Uses an LLM to write Python code to generate a plot."""
+        
+        prompt = f"""
+        You are an expert Python data scientist specializing in Matplotlib.
+        Your task is to write Python code to generate a single, insightful visualization for the given data and goal.
+
+        You have been given a pandas DataFrame named `df`. The first column of this DataFrame is the index (e.g., model names). The first few rows look like this:
+        ---
+        {df_head}
+        ---
+
+        The user's analysis goal is: "{analysis_goal}"
+
+        **Instructions:**
+        1.  Analyze the data types and the user's goal to choose the best chart type (e.g., bar, line, scatter).
+        2.  Write Python code that uses the `df` DataFrame.
+        3.  **IMPORTANT:** To plot, use the format `plt.bar(df.index, df['ColumnName'])` or `plt.scatter(df['ColumnA'], df['ColumnB'])`. Do NOT use `df.plot()`. This is more robust.
+        4.  The code MUST save the plot to a file named 'plot.png' using `plt.savefig('plot.png')`.
+        5.  The code MUST call `plt.close()` at the end to free up memory.
+        6.  Do NOT include any code to create the DataFrame (`df = pd.DataFrame(...)`). Assume `df` already exists.
+        7.  Make the plot look professional: add a title, labels, and a legend where appropriate. Use `plt.tight_layout()`.
+        8.  Return ONLY the raw Python code. Do not wrap it in markdown backticks or add any explanations.
+        
+        Example for a bar chart:
+        plt.figure(figsize=(12, 7))
+        plt.bar(df.index, df['BLEU Score'])
+        plt.title('My Title')
+        plt.ylabel('BLEU Score')
+        plt.xlabel('Model')
+        plt.xticks(rotation=45, ha='right')
+        plt.tight_layout()
+        plt.savefig('plot.png')
+        plt.close()
+        """
+        
+        print("Master Data-Viz tool is writing plotting code...")
+        code_generation_response = self.code_writing_llm.invoke(prompt)
+        return code_generation_response.content
+
+    # --- NEW HELPER FUNCTION for safe code execution ---
+    def execute_python_code(self, code: str, df: pd.DataFrame) -> str:
+        """
+        Executes Python code in a controlled environment.
+        Captures stdout, stderr, and any exceptions.
+        """
+     
+        buffer = StringIO()
+        
+  
+        local_scope = {
+            'df': df,
+            'pd': pd,
+            'plt': plt
+        }
+        
+        try:
+           
+            from contextlib import redirect_stdout
+            with redirect_stdout(buffer):
+                exec(code, {"__builtins__": __builtins__}, local_scope)
+            
+        
+            stdout = buffer.getvalue()
+            return f"Code executed successfully. Captured output:\n{stdout}"
+        except Exception as e:
+            stderr = buffer.getvalue()
+            return f"An error occurred during code execution:\n{e}\nCaptured output:\n{stderr}"
+
+    def _run(self, json_data: str, analysis_goal: str, filename: str) -> str:
+        try:
+       
+            data = json.loads(json_data)
+            df = pd.DataFrame(data['data'], columns=data['columns'])
+            
+         
+            for col in df.columns:
+                if df[col].dtype == 'object' and df[col].nunique() == len(df):
+                    df.set_index(col, inplace=True)
+                    break
+            for col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='ignore')
+
+            # 2. Generate the Python code for plotting (same as before)
+            generated_code = self._generate_plotting_code(df.head().to_string(), analysis_goal)
+            
+            # Remove markdown backticks from the generated code, just in case
+            if generated_code.startswith("```python"):
+                generated_code = generated_code[9:-3].strip()
+
+            # 3. Execute the code using our new robust function
+            execution_result = self.execute_python_code(generated_code, df)
+            print(f"--- Execution Result ---\n{execution_result}\n------------------------")
+
+            # 4. Rename and confirm
+            temp_filename = 'plot.png' # The code always saves to this
+            if os.path.exists(temp_filename):
+                os.rename(temp_filename, filename)
+                return f"Successfully generated and saved visualization to '{filename}'."
+            else:
+                return f"Error: Code executed but did not produce the expected file '{temp_filename}'. Execution details: {execution_result}"
+
+        except Exception as e:
+            return f"An error occurred in the tool's main logic: {e}"

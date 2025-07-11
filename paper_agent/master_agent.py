@@ -1,17 +1,15 @@
-# paper_agent/master_agent.py
-
 from .agent import PaperAgent as WorkerAgent # Our ReAct agent is now the worker
 from langchain_core.language_models.chat_models import BaseChatModel
 from typing import Dict, Any
 import json
-import re  # <-- Import the regular expressions library
+import re 
 
 class MasterAgent:
     """
     A stateful, self-correcting agent that can reason, re-plan, and
     execute complex tasks by orchestrating a worker agent and its tools.
     """
-    def __init__(self, worker_agent: WorkerAgent, llm: BaseChatModel, max_loops: int = 7):
+    def __init__(self, worker_agent: WorkerAgent, llm: BaseChatModel, max_loops: int = 20):
         self.worker_agent = worker_agent
         self.llm = llm
         self.max_loops = max_loops

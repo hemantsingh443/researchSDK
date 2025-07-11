@@ -7,16 +7,16 @@ from langchain_neo4j import Neo4jGraph
 from .knowledge_base import KnowledgeBase
 from .ingestor import Ingestor
 from .tools import (
-    GraphPaperFinderTool, # <-- THE NEW TOOL
+    GraphPaperFinderTool, 
     QuestionAnsweringTool,   
     ArxivSearchTool,
     ArxivFetchTool,
     PaperSummarizationTool,
     web_search_tool,
     GraphQueryTool,         
-    TableExtractionTool,    # <-- Import the new tool
-    RelationshipAnalysisTool, # <-- Import the relationship tool
-    PlotGenerationTool,     # <-- Import the plot tool
+    TableExtractionTool,   
+    RelationshipAnalysisTool,
+    DynamicVisualizationTool 
 )
 from .extractor import Extractor
 from langchain_google_genai import ChatGoogleGenerativeAI # <-- NEW IMPORT
@@ -159,7 +159,7 @@ class PaperAgent:
         if llm_provider == "google":
             if not os.getenv("GOOGLE_API_KEY"):
                 raise ValueError("GOOGLE_API_KEY not found in environment variables.")
-            llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", temperature=0.1)
+            llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.1)
         elif llm_provider == "local":
             llm = ChatOllama(
                 model="llama3:8b-instruct-q4_K_M",
@@ -174,7 +174,7 @@ class PaperAgent:
         # The KnowledgeBase now takes the Neo4j credentials
         self.kb = KnowledgeBase(db_path=db_path, neo4j_uri=neo4j_uri, neo4j_user=neo4j_user, neo4j_password=neo4j_password)
         if llm_provider == "google":
-            extractor_model = "gemini-1.5-flash-latest"
+            extractor_model = "gemini-1.5-flash"
             extractor_api_type = "google"
         else:
             extractor_model = "llama3:8b-instruct-q4_K_M"
@@ -192,15 +192,16 @@ class PaperAgent:
         # 4. Initialize the tool suite, including the new graph tool
         self.tools = [
             web_search_tool,
-            GraphPaperFinderTool(graph=graph), # <-- REPLACE THE OLD FINDER, use class default description
+            GraphPaperFinderTool(graph=graph), # <-- REPLACE THE OLD FINDER
             QuestionAnsweringTool(rag_agent=rag_sub_agent), # <-- The "smart" RAG tool
             GraphQueryTool(graph=graph), # <-- ADD NEW TOOL
             ArxivSearchTool(ingestor=self.ingestor, kb=self.kb),
-            ArxivFetchTool(ingestor=self.ingestor, kb=self.kb, description="Fetches the full text and metadata for a given arXiv paper ID."),
-            PaperSummarizationTool(kb=self.kb, extractor=self.extractor, description="Summarizes a given scientific paper from the knowledge base."),
-            TableExtractionTool(kb=self.kb, extractor=self.extractor, description="Extracts tables from a given scientific paper in the knowledge base."),
-            RelationshipAnalysisTool(graph=graph, llm=llm, description="Analyzes relationships between scientific concepts or papers using the knowledge graph and LLM."),
-            PlotGenerationTool(description="Generates plots or visualizations from extracted data or paper content."),
+            ArxivFetchTool(ingestor=self.ingestor, kb=self.kb),
+            PaperSummarizationTool(kb=self.kb, extractor=self.extractor),
+            TableExtractionTool(kb=self.kb, extractor=self.extractor),
+            RelationshipAnalysisTool(graph=graph, llm=llm),
+            # Replace the old tool with the new one, passing it an LLM to use
+            DynamicVisualizationTool(code_writing_llm=llm)
         ]
         tool_names = ", ".join([str(t.name) for t in self.tools if t.name])
         print(f"Tools Initialized: [{tool_names}]")

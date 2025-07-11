@@ -13,4 +13,5 @@ langchainhub
 duckduckgo-search 
 neo4j
 langchain-community 
-matplotlib
+matplotlib 
+numpy
