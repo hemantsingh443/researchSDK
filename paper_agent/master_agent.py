@@ -46,9 +46,8 @@ class MasterAgent:
         return json.loads(json_string)
 
     def run(self, user_query: str):
-        """The main loop of the Master Agent."""
+        """The main loop of the Master Agent, now with a final synthesis step."""
         
-        # Initialize the state (the "scratchpad")
         state: Dict[str, Any] = {
             "original_request": user_query,
             "completed_steps": []
@@ -57,15 +56,12 @@ class MasterAgent:
         for i in range(self.max_loops):
             print(f"\n{'='*20} MASTER AGENT LOOP {i+1}/{self.max_loops} {'='*20}")
 
-            # 1. THINK & RE-PLAN
-            # Create the prompt for the master LLM to decide the next action
             master_prompt = self._create_master_prompt(state)
             
             print("MasterAgent is thinking...")
             llm_response_str = self.llm.invoke(master_prompt).content
             
             try:
-                # The LLM should respond with a JSON object containing its thought and the next action
                 response_str = llm_response_str
                 if not isinstance(response_str, str):
                     # If it's a list, join elements as string
@@ -73,52 +69,68 @@ class MasterAgent:
                         response_str = "\n".join([str(x) for x in response_str])
                     else:
                         response_str = str(response_str)
-                # --- USE THE NEW ROBUST PARSER ---
                 decision = self._clean_and_parse_json(response_str)
                 thought = decision.get("thought", "No thought provided.")
                 action_json = decision.get("action", {})
-            except (json.JSONDecodeError, AttributeError) as e: # Catch more potential errors
+            except (json.JSONDecodeError, AttributeError) as e:
                 print(f"MasterAgent failed to generate valid JSON. Error: {e}")
                 print(f"Raw Response was: {llm_response_str}")
-                thought = "Error in parsing LLM response. Attempting to recover."
-                # We can make the recovery smarter later, for now, we stop.
-                action_json = {"action": "Final Answer", "action_input": "I encountered an internal error and cannot proceed."}
+                break # <-- Exit the loop on a critical error
 
             print(f"Thought: {thought}")
 
-            # 2. ACT
-            if isinstance(action_json, dict):
-                action_name = action_json.get("action")
-                action_input = action_json.get("action_input")
-            elif isinstance(action_json, str):
-                action_name = action_json
-                action_input = None
-            else:
-                action_name = None
-                action_input = None
+            action_name = action_json.get("action")
+            action_input = action_json.get("action_input")
 
-            # Check for completion
+            # If the agent decides it's done, we break the loop and move to synthesis.
             if action_name == "Final Answer":
-                print("MasterAgent has decided the task is complete.")
-                return action_input
-
-            # Execute the chosen action using the worker agent
-            if not isinstance(action_name, str):
-                print("Invalid or missing action name. Skipping this step.")
+                print("MasterAgent has decided the task is complete. Moving to final report generation.")
+                # We can add the agent's own final thought to the state
+                state["completed_steps"].append({
+                    "step": i + 1,
+                    "thought": thought,
+                    "action_taken": "Final Answer",
+                    "observation": action_input # The agent's own conclusion
+                })
                 break
+
+            print(f"MasterAgent directs worker to execute: {action_name}")
             worker_response = self.worker_agent.run_single_tool(action_name, action_input)
             
-            # 3. OBSERVE & UPDATE STATE
-            # Add the result of this loop to our state
             state["completed_steps"].append({
                 "step": i + 1,
                 "thought": thought,
                 "action_taken": action_json,
                 "observation": worker_response
             })
+        else: # This 'else' belongs to the 'for' loop
+            print("MasterAgent reached maximum loops.")
 
-        print("MasterAgent reached maximum loops.")
-        return "I could not complete the request within the allowed number of steps."
+        # --- THE NEW, EXPLICIT SYNTHESIS STEP ---
+        # This code runs AFTER the loop finishes, either by completing or timing out.
+        print("\n\n" + "="*20 + " GENERATING FINAL REPORT " + "="*20)
+        
+        final_synthesis_prompt = f"""
+        You are a brilliant scientific analyst and writer. The project to answer '{state['original_request']}' is complete.
+        Your task is to synthesize all the information gathered in the 'Project State' into a single, comprehensive report for the user.
+
+        **Structure your report as follows:**
+        1.  **Executive Summary:** A single paragraph that directly answers the user's core request.
+        2.  **Key Findings:** A bulleted list of the most important insights discovered.
+        3.  **Detailed Analysis:** A more in-depth explanation of the steps taken and the information found.
+        4.  **Visualizations:** Reference any plots that were created and explain what they show.
+        5.  **Conclusion & Limitations:** Conclude the report and mention any steps that could not be completed and why (e.g., "The requested table could not be extracted due to...").
+
+        **PROJECT STATE (The full history of your work):**
+        ---
+        {json.dumps(state, indent=2)}
+        ---
+
+        Write the final report in clear, professional language using Markdown formatting.
+        """
+        
+        final_report = self.llm.invoke(final_synthesis_prompt).content
+        return final_report
 
     def _create_master_prompt(self, state: Dict[str, Any]) -> str:
         """Creates the dynamic prompt for the master LLM."""

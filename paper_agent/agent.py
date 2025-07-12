@@ -16,7 +16,9 @@ from .tools import (
     GraphQueryTool,         
     TableExtractionTool,   
     RelationshipAnalysisTool,
-    DynamicVisualizationTool 
+    DynamicVisualizationTool,
+    CitationAnalysisTool,   # <-- Add import
+    KeywordExtractionTool   # <-- Add import
 )
 from .extractor import Extractor
 from langchain_google_genai import ChatGoogleGenerativeAI # <-- NEW IMPORT
@@ -200,7 +202,8 @@ class PaperAgent:
             PaperSummarizationTool(kb=self.kb, extractor=self.extractor),
             TableExtractionTool(kb=self.kb, extractor=self.extractor),
             RelationshipAnalysisTool(graph=graph, llm=llm),
-            # Replace the old tool with the new one, passing it an LLM to use
+            CitationAnalysisTool(graph=graph),              # <-- Add citation analysis tool
+            KeywordExtractionTool(kb=self.kb, extractor=self.extractor), # <-- Add keyword extraction tool
             DynamicVisualizationTool(code_writing_llm=llm)
         ]
         tool_names = ", ".join([str(t.name) for t in self.tools if t.name])

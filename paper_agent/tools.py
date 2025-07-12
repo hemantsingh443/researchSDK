@@ -9,7 +9,7 @@ from io import StringIO
 import json 
 import numpy as np
 import os
-from langchain_core.language_models.chat_models import BaseChatModel # <-- NEW
+from langchain_core.language_models.chat_models import BaseChatModel 
 
 from .knowledge_base import KnowledgeBase
 from .ingestor import Ingestor
@@ -27,7 +27,7 @@ class KBQueryInput(BaseModel):
 
 class KnowledgeBaseQueryTool(BaseTool):
     """A tool to answer questions about scientific papers."""
-    name: str = "scientific_paper_knowledge_base_tool"  # <-- More specific name
+    name: str = "scientific_paper_knowledge_base_tool" 
     description: str = (
         "**This is the primary tool.** Use this tool FIRST for any question about "
         "scientific topics, research papers, methodologies, or experimental results. "
@@ -357,6 +357,74 @@ class RelationshipAnalysisTool(BaseTool):
         response = self.llm.invoke(synthesis_prompt)
         return response.content
 
+class CitationAnalysisInput(BaseModel):
+    analysis_type: str = Field(description="The type of citation analysis to perform. Options: 'most_cited', 'hottest_papers'.")
+    limit: int = Field(default=5, description="The number of papers to return.")
+
+class CitationAnalysisTool(BaseTool):
+    """
+    Performs citation analysis on the knowledge graph. Can find the most cited papers
+    or the papers with the most outgoing citations ('hottest papers' or foundational work).
+    """
+    name: str = "citation_analysis_tool"
+    description: str = (
+        "Use this to find influential papers. 'most_cited' finds papers that many others reference. "
+        "'hottest_papers' finds papers that reference many others."
+    )
+    args_schema: Type[CitationAnalysisInput] = CitationAnalysisInput
+    graph: Neo4jGraph
+
+    def _run(self, analysis_type: str, limit: int = 5) -> str:
+        if analysis_type == 'most_cited':
+            # This query counts incoming CITES relationships
+            query = f"""
+            MATCH (p:Paper)<-[r:CITES]-()
+            RETURN p.title AS paper, count(r) AS citations
+            ORDER BY citations DESC
+            LIMIT {limit}
+            """
+        elif analysis_type == 'hottest_papers':
+            # This query counts outgoing CITES relationships
+            query = f"""
+            MATCH (p:Paper)-[r:CITES]->()
+            RETURN p.title AS paper, count(r) AS citations_made
+            ORDER BY citations_made DESC
+            LIMIT {limit}
+            """
+        else:
+            return "Error: Invalid analysis_type. Must be 'most_cited' or 'hottest_papers'."
+
+        print(f"Running citation analysis query: {analysis_type}")
+        try:
+            result = self.graph.query(query)
+            if not result:
+                return "No citation data found in the graph to perform analysis."
+            return str(result)
+        except Exception as e:
+            return f"Error during citation analysis: {e}"
+
+class KeywordExtractionInput(BaseModel):
+    paper_id: str = Field(description="The ID of the paper from which to extract keywords.")
+    num_keywords: int = Field(default=10, description="The number of keywords to extract.")
+
+class KeywordExtractionTool(BaseTool):
+    """Extracts the most important keywords or concepts from a given paper."""
+    name: str = "keyword_extraction_tool"
+    description: str = "Use this to identify the main topics, concepts, or keywords of a specific paper."
+    args_schema: Type[KeywordExtractionInput] = KeywordExtractionInput
+    kb: KnowledgeBase
+    extractor: Extractor # Uses an LLM to find the keywords
+
+    def _run(self, paper_id: str, num_keywords: int = 10) -> str:
+        results = self.kb.collection.get(where={"paper_id": paper_id})
+        if not results or not results['documents']:
+            return f"Error: Could not find paper with ID {paper_id}."
+        
+        full_text = " ".join(results['documents'])
+        # Call a new method on our extractor
+        keywords = self.extractor.extract_keywords(full_text, num_keywords)
+        return f"The key concepts are: {', '.join(keywords)}"
+
 class PlottingInput(BaseModel):
     # The input is now a JSON string, not markdown
     json_data: str = Field(description="A JSON string containing the table data, with 'columns' and 'data' keys.")
@@ -431,7 +499,7 @@ class SmartPlotGenerationTool(BaseTool):
                     df[[largest_col]].plot(kind='bar', ax=ax2, color='red', position=1, width=0.4)
 
                     ax1.set_ylabel('Error Metrics')
-                    ax2.set_ylabel(largest_col, color='red')
+                    ax2.set_ylabel(str(largest_col), color='red')
                     ax1.set_title(title)
                     fig.legend(loc="upper right", bbox_to_anchor=(1,1), bbox_transform=ax1.transAxes)
 
@@ -452,62 +520,113 @@ class DynamicVisualizationInput(BaseModel):
     json_data: str = Field(description="A JSON string with 'columns' and 'data' keys, representing the data to be visualized.")
     analysis_goal: str = Field(description="A clear, natural language description of what the visualization should show. E.g., 'Compare the performance of each model', 'Show the trend of training cost over time', 'Show the distribution of different model types'.")
     filename: str = Field(description="The filename to save the plot to (e.g., 'visualization.png').")
+    chart_type: str | None = Field(default=None, description="Optional. The type of chart to generate (e.g., 'bar', 'line', 'scatter', 'box', 'violin', 'hist'). If not specified, infer from the data and analysis goal.")
 
 class DynamicVisualizationTool(BaseTool):
     """
     An advanced data visualization tool. It takes structured JSON data and a high-level goal,
     and then generates and executes Python code to create the best possible visualization.
-    It can create bar charts, line plots, scatter plots, pie charts, and more.
+    It can create bar charts, line plots, scatter plots, pie charts, violin plots, box plots, histograms, and more.
     """
     name: str = "dynamic_visualization_tool"
     description: str = (
         "Use this tool to create insightful data visualizations from structured JSON data. "
-        "Provide the data and a clear goal for the analysis."
+        "Provide the data and a clear goal for the analysis. Optionally, specify a chart_type ('bar', 'line', 'scatter', 'box', 'violin', 'hist', etc.)."
     )
     args_schema: Type[DynamicVisualizationInput] = DynamicVisualizationInput
     
     # This tool needs its own LLM to write the plotting code
     code_writing_llm: BaseChatModel
 
-    def _generate_plotting_code(self, df_head: str, analysis_goal: str) -> str:
-        """Uses an LLM to write Python code to generate a plot."""
-        
+    def _generate_plotting_code(self, df_head: str, analysis_goal: str, chart_type: str | None = None) -> str:
+        """Uses an LLM to write robust, safe Python code to generate a plot."""
+        chart_type_instruction = f"The user requested a '{chart_type}' plot. Generate code for this plot type." if chart_type else ""
         prompt = f"""
-        You are an expert Python data scientist specializing in Matplotlib.
-        Your task is to write Python code to generate a single, insightful visualization for the given data and goal.
+        You are an expert Python data scientist. Your task is to write a snippet of Python code to generate a single, insightful Matplotlib visualization.
 
-        You have been given a pandas DataFrame named `df`. The first column of this DataFrame is the index (e.g., model names). The first few rows look like this:
+        You are given a pandas DataFrame named `df`. Its `df.index` is set to the categorical labels for the x-axis. The first few rows are:
         ---
         {df_head}
         ---
-
         The user's analysis goal is: "{analysis_goal}"
+        {chart_type_instruction}
 
-        **Instructions:**
-        1.  Analyze the data types and the user's goal to choose the best chart type (e.g., bar, line, scatter).
-        2.  Write Python code that uses the `df` DataFrame.
-        3.  **IMPORTANT:** To plot, use the format `plt.bar(df.index, df['ColumnName'])` or `plt.scatter(df['ColumnA'], df['ColumnB'])`. Do NOT use `df.plot()`. This is more robust.
-        4.  The code MUST save the plot to a file named 'plot.png' using `plt.savefig('plot.png')`.
-        5.  The code MUST call `plt.close()` at the end to free up memory.
-        6.  Do NOT include any code to create the DataFrame (`df = pd.DataFrame(...)`). Assume `df` already exists.
-        7.  Make the plot look professional: add a title, labels, and a legend where appropriate. Use `plt.tight_layout()`.
-        8.  Return ONLY the raw Python code. Do not wrap it in markdown backticks or add any explanations.
-        
-        Example for a bar chart:
-        plt.figure(figsize=(12, 7))
-        plt.bar(df.index, df['BLEU Score'])
-        plt.title('My Title')
-        plt.ylabel('BLEU Score')
-        plt.xlabel('Model')
-        plt.xticks(rotation=45, ha='right')
-        plt.tight_layout()
-        plt.savefig('plot.png')
-        plt.close()
+        **CRITICAL INSTRUCTIONS:**
+        1.  Your code will be executed with a pre-existing DataFrame named `df`.
+        2.  **DO NOT, under any circumstances, redeclare, redefine, or create the `df` variable.** Do not write `df = ...`, `df = pd.DataFrame(...)`, or any similar statement. Do not include any sample data or import statements.
+        3.  **Your code MUST directly use the existing `df` object.**
+        4.  You may use advanced plot types such as violin plots, box plots, histograms, or scatter plots if the analysis goal or chart_type suggests it.
+        5.  Use the robust syntax: `ax.bar(df.index, df['Column'])`, `ax.scatter(df['ColA'], df['ColB'])`, `ax.boxplot(...)`, `ax.violinplot(...)`, etc. Do NOT use the high-level `df.plot()` wrapper.
+        6.  Always create a figure and axes object first: `fig, ax = plt.subplots(figsize=(12, 7))`. Plot on the `ax` object.
+        7.  To rotate x-axis labels, use `ax.tick_params(axis='x', rotation=45)`. Do NOT use `plt.xticks(rotation=...)`.
+        8.  The code MUST save the plot to a file named 'plot.png' using `fig.savefig('plot.png', bbox_inches='tight')`.
+        9.  The code MUST call `plt.close(fig)` at the end to close the specific figure.
+        10. Make the plot professional: use `ax.set_title()`, `ax.set_xlabel()`, and `ax.set_ylabel()`.
+        11. Return ONLY the Python code snippet. Do not add any other text, markdown wrappers, import statements, or DataFrame creation.
+        12. **WARNING:** If you include any import statements, DataFrame creation, or redefinition of `df`, your code will be automatically stripped of those lines and only the plotting code will be executed.
+
+        **Examples:**
+        # Violin plot:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.violinplot([df['Metric1'], df['Metric2']], showmeans=True)
+        ax.set_xticks([1, 2])
+        ax.set_xticklabels(['Metric1', 'Metric2'])
+        ax.set_title('Distribution of Metrics')
+        fig.savefig('plot.png', bbox_inches='tight')
+        plt.close(fig)
+
+        # Box plot:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.boxplot([df['Metric1'], df['Metric2']])
+        ax.set_xticks([1, 2])
+        ax.set_xticklabels(['Metric1', 'Metric2'])
+        ax.set_title('Boxplot of Metrics')
+        fig.savefig('plot.png', bbox_inches='tight')
+        plt.close(fig)
+
+        # Histogram:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.hist(df['Metric1'], bins=10)
+        ax.set_title('Histogram of Metric1')
+        fig.savefig('plot.png', bbox_inches='tight')
+        plt.close(fig)
         """
         
-        print("Master Data-Viz tool is writing plotting code...")
+        print("Master Data-Viz tool is writing robust plotting code...")
         code_generation_response = self.code_writing_llm.invoke(prompt)
-        return code_generation_response.content
+        # Ensure the return is always a string
+        if isinstance(code_generation_response.content, str):
+            return code_generation_response.content
+        elif isinstance(code_generation_response.content, list):
+            return "\n".join([str(x) for x in code_generation_response.content])
+        else:
+            return str(code_generation_response.content)
+
+    def clean_generated_code(self, code: str) -> str:
+        """Removes forbidden lines (imports, df creation, pd/plt redefinitions, empty lines, markdown, non-printable chars) from generated code."""
+        import re
+        lines = code.splitlines()
+        cleaned = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith('import'):
+                continue
+            if stripped.startswith('df ='):
+                continue
+            if stripped.startswith('pd =') or stripped.startswith('plt ='):
+                continue
+            if 'DataFrame' in stripped and ('=' in stripped):
+                continue
+            # Remove markdown code block markers
+            if stripped.startswith('```') or stripped.endswith('```'):
+                continue
+            cleaned.append(line)
+        cleaned_code = '\n'.join(cleaned)
+        # Remove non-printable and non-ASCII characters
+        cleaned_code = re.sub(r'[^\x20-\x7E\n\t]', '', cleaned_code)
+        return cleaned_code
 
     # --- NEW HELPER FUNCTION for safe code execution ---
     def execute_python_code(self, code: str, df: pd.DataFrame) -> str:
@@ -538,13 +657,10 @@ class DynamicVisualizationTool(BaseTool):
             stderr = buffer.getvalue()
             return f"An error occurred during code execution:\n{e}\nCaptured output:\n{stderr}"
 
-    def _run(self, json_data: str, analysis_goal: str, filename: str) -> str:
+    def _run(self, json_data: str, analysis_goal: str, filename: str, chart_type: str = "") -> str:
         try:
-       
             data = json.loads(json_data)
             df = pd.DataFrame(data['data'], columns=data['columns'])
-            
-         
             for col in df.columns:
                 if df[col].dtype == 'object' and df[col].nunique() == len(df):
                     df.set_index(col, inplace=True)
@@ -552,24 +668,34 @@ class DynamicVisualizationTool(BaseTool):
             for col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='ignore')
 
-            # 2. Generate the Python code for plotting (same as before)
-            generated_code = self._generate_plotting_code(df.head().to_string(), analysis_goal)
-            
-            # Remove markdown backticks from the generated code, just in case
-            if generated_code.startswith("```python"):
-                generated_code = generated_code[9:-3].strip()
+            generated_code = self._generate_plotting_code(df.head().to_string(), analysis_goal, chart_type)
+            if "```python" in generated_code:
+                generated_code = generated_code.split("```python")[1].split("````")[0].strip()
+            elif "```" in generated_code:
+                generated_code = generated_code.split("```")[1].split("```")[0].strip()
+            cleaned_code = self.clean_generated_code(generated_code)
+            print(f"--- Cleaned Plotting Code (repr) ---\n{repr(cleaned_code)}\n-----------------------------")
 
-            # 3. Execute the code using our new robust function
-            execution_result = self.execute_python_code(generated_code, df)
+            # Try executing the whole code, if syntax error, try line by line
+            try:
+                execution_result = self.execute_python_code(cleaned_code, df)
+            except SyntaxError as e:
+                print(f"SyntaxError in full code: {e}. Trying line-by-line execution...")
+                lines = cleaned_code.split('\n')
+                for i, line in enumerate(lines):
+                    try:
+                        exec(line, {'df': df, 'plt': __import__('matplotlib.pyplot'), 'pd': __import__('pandas')})
+                    except Exception as le:
+                        print(f"Line {i+1} failed: {repr(line)}\nError: {le}")
+                execution_result = "SyntaxError encountered. See above for details."
             print(f"--- Execution Result ---\n{execution_result}\n------------------------")
-
-            # 4. Rename and confirm
-            temp_filename = 'plot.png' # The code always saves to this
+            
+            temp_filename = 'plot.png'
             if os.path.exists(temp_filename):
                 os.rename(temp_filename, filename)
                 return f"Successfully generated and saved visualization to '{filename}'."
             else:
-                return f"Error: Code executed but did not produce the expected file '{temp_filename}'. Execution details: {execution_result}"
+                return f"Error: Code executed but did not produce '{temp_filename}'. Details: {execution_result}"
 
         except Exception as e:
             return f"An error occurred in the tool's main logic: {e}"

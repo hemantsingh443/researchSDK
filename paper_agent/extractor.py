@@ -247,3 +247,54 @@ class Extractor:
     def extract_citations(self, text: str) -> list[str]:
         # TODO: Implement with LLM or regex
         return []
+
+    def extract_keywords(self, paper_text: str, num_keywords: int) -> list[str]:
+        """Uses an LLM to pull out the most important keywords from a text."""
+        prompt = f"""
+        You are an expert at scientific keyword extraction.
+        From the following text, identify the {num_keywords} most important and specific keywords, concepts, and technical terms.
+        Do not include generic terms like 'research', 'paper', or 'model'. Focus on specific, technical concepts.
+        
+        Return your answer as a single JSON object with one key, \"keywords\", which is a list of strings.
+
+        Text:
+        ---
+        {paper_text[:20000]}
+        ---
+        
+        JSON output:
+        """
+        print(f"Sending request to LLM for keyword extraction...")
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        if isinstance(self.client, ChatGoogleGenerativeAI):
+            response = self.client.invoke(prompt)
+            raw_content = response.content if hasattr(response, 'content') else str(response)
+            # Ensure raw_content is a string
+            if not isinstance(raw_content, str):
+                raw_content = str(raw_content)
+            # Try to extract JSON from the response
+            try:
+                json_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
+                if not json_match:
+                    return ["Error: No JSON object found in LLM response."]
+                json_str = json_match.group(0)
+                json_str = re.sub(r',\s*([\}\]])', r'\1', json_str)
+                data = json.loads(json_str)
+                return data.get("keywords", [])
+            except Exception:
+                return ["Error parsing keywords from LLM response."]
+        else:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                response_format={"type": "json_object"}
+            )
+            try:
+                content = response.choices[0].message.content
+                if content is None:
+                    return ["Error: No content in OpenAI response."]
+                data = json.loads(content)
+                return data.get("keywords", [])
+            except (json.JSONDecodeError, AttributeError):
+                return ["Error parsing keywords from LLM response."]
