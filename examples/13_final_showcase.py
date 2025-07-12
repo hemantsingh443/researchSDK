@@ -1,12 +1,10 @@
 from paper_agent.agent import PaperAgent as WorkerAgent
 from paper_agent.master_agent import MasterAgent
 from langchain_google_genai import ChatGoogleGenerativeAI
-import sys
-import os
 
 def run_final_showcase():
     worker_agent = WorkerAgent(db_path="./paper_db", llm_provider="google")
-    master_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.0)
+    master_llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash-lite", temperature=0.0)
     master_agent = MasterAgent(worker_agent=worker_agent, llm=master_llm)
 
     final_query = """

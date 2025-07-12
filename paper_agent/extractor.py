@@ -4,6 +4,7 @@ from .structures import Paper, Author
 import json
 import re 
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_community.chat_models import ChatOllama
 
 load_dotenv()
 
@@ -65,10 +66,21 @@ class Extractor:
         """
         print(f"Sending request to LLM ({self.model}) for metadata extraction...")
         try:
-            if isinstance(self.client, ChatGoogleGenerativeAI):
-                response = self.client.invoke(
-                    f"From the text of a scientific paper below, extract the title, authors, and abstract. Provide the output ONLY as a single, clean JSON object. Do not add any other text before or after the JSON. The JSON object must have these exact keys: 'title', 'authors', 'abstract'. 'authors' should be a list of strings of author names. The author names might have symbols like '*' or '†' next to them; please remove these symbols. Here is the text: --- {paper.full_text[:15000]} --- JSON_OUTPUT:"
-                )
+            if isinstance(self.client, ChatGoogleGenerativeAI) or isinstance(self.client, ChatOllama):
+                try:
+                    response = self.client.invoke(
+                        f"From the text of a scientific paper below, extract the title, authors, and abstract. Provide the output ONLY as a single, clean JSON object. Do not add any other text before or after the JSON. The JSON object must have these exact keys: 'title', 'authors', 'abstract'. 'authors' should be a list of strings of author names. The author names might have symbols like '*' or '†' next to them; please remove these symbols. Here is the text: --- {paper.full_text[:15000]} --- JSON_OUTPUT:"
+                    )
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if "quota" in err_str or "429" in err_str or "resourceexhausted" in err_str:
+                        print("Quota hit or rate limited in Extractor. Switching to local Llama 3 model...")
+                        self.client = ChatOllama(model="llama3:8b-instruct-q4_K_M", temperature=0.0)
+                        response = self.client.invoke(
+                            f"From the text of a scientific paper below, extract the title, authors, and abstract. Provide the output ONLY as a single, clean JSON object. Do not add any other text before or after the JSON. The JSON object must have these exact keys: 'title', 'authors', 'abstract'. 'authors' should be a list of strings of author names. The author names might have symbols like '*' or '†' next to them; please remove these symbols. Here is the text: --- {paper.full_text[:15000]} --- JSON_OUTPUT:"
+                        )
+                    else:
+                        raise
                 raw_content = response.content if hasattr(response, 'content') else str(response)
             else:
                 response = self.client.chat.completions.create(
@@ -138,17 +150,27 @@ class Extractor:
         """
         
         print(f"Sending request to LLM for summarization of '{paper_title}'...")
-        if isinstance(self.client, ChatGoogleGenerativeAI):
-            response = self.client.invoke(
-                f"You are a scientific summarization assistant. Your task is to provide a concise summary of the following research paper. Focus on these key areas: 1.  **Problem:** What problem does the paper aim to solve? 2.  **Methodology:** What is the core approach or method proposed? 3.  **Key Findings:** What were the main results or conclusions? Do not include your own opinions or any information not present in the text. Paper Title: {paper_title} --- Paper Text: {paper_text[:25000]} --- Please provide a summary based on the text."
-            )
-            summary = response.content if hasattr(response, 'content') else str(response)
+        if isinstance(self.client, ChatGoogleGenerativeAI) or isinstance(self.client, ChatOllama):
+            try:
+                response = self.client.invoke(
+                    f"You are a scientific summarization assistant. Your task is to provide a concise summary of the following research paper. Focus on these key areas: 1.  **Problem:** What problem does the paper aim to solve? 2.  **Methodology:** What is the core approach or method proposed? 3.  **Key Findings:** What were the main results or conclusions? Do not include your own opinions or any information not present in the text. Paper Title: {paper_title} --- Paper Text: {paper_text[:25000]} --- Please provide a summary based on the text."
+                )
+                summary = response.content if hasattr(response, 'content') else str(response)
+            except Exception as e:
+                err_str = str(e).lower()
+                if "quota" in err_str or "429" in err_str or "resourceexhausted" in err_str:
+                    print("Quota hit or rate limited in Extractor. Switching to local Llama 3 model...")
+                    self.client = ChatOllama(model="llama3:8b-instruct-q4_K_M", temperature=0.0)
+                    response = self.client.invoke(
+                        f"You are a scientific summarization assistant. Your task is to provide a concise summary of the following research paper. Focus on these key areas: 1.  **Problem:** What problem does the paper aim to solve? 2.  **Methodology:** What is the core approach or method proposed? 3.  **Key Findings:** What were the main results or conclusions? Do not include your own opinions or any information not present in the text. Paper Title: {paper_title} --- Paper Text: {paper_text[:25000]} --- Please provide a summary based on the text."
+                    )
+                    summary = response.content if hasattr(response, 'content') else str(response)
+                else:
+                    raise
         else:
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
+                messages=[{"role": "user", "content": prompt}],
                 temperature=0.2
             )
             summary = response.choices[0].message.content
@@ -179,9 +201,19 @@ class Extractor:
         """
         print(f"Sending request to LLM for table extraction on topic: '{topic}'...")
         from langchain_google_genai import ChatGoogleGenerativeAI
-        if isinstance(self.client, ChatGoogleGenerativeAI):
-            response = self.client.invoke(prompt)
-            result = response.content if hasattr(response, 'content') else str(response)
+        if isinstance(self.client, ChatGoogleGenerativeAI) or isinstance(self.client, ChatOllama):
+            try:
+                response = self.client.invoke(prompt)
+                result = response.content if hasattr(response, 'content') else str(response)
+            except Exception as e:
+                err_str = str(e).lower()
+                if "quota" in err_str or "429" in err_str or "resourceexhausted" in err_str:
+                    print("Quota hit or rate limited in Extractor. Switching to local Llama 3 model...")
+                    self.client = ChatOllama(model="llama3:8b-instruct-q4_K_M", temperature=0.0)
+                    response = self.client.invoke(prompt)
+                    result = response.content if hasattr(response, 'content') else str(response)
+                else:
+                    raise
         else:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -224,9 +256,19 @@ class Extractor:
         """
         print(f"Sending request to LLM for JSON table extraction on topic: '{topic}'...")
         from langchain_google_genai import ChatGoogleGenerativeAI
-        if isinstance(self.client, ChatGoogleGenerativeAI):
-            response = self.client.invoke(prompt)
-            result = response.content if hasattr(response, 'content') else str(response)
+        if isinstance(self.client, ChatGoogleGenerativeAI) or isinstance(self.client, ChatOllama):
+            try:
+                response = self.client.invoke(prompt)
+                result = response.content if hasattr(response, 'content') else str(response)
+            except Exception as e:
+                err_str = str(e).lower()
+                if "quota" in err_str or "429" in err_str or "resourceexhausted" in err_str:
+                    print("Quota hit or rate limited in Extractor. Switching to local Llama 3 model...")
+                    self.client = ChatOllama(model="llama3:8b-instruct-q4_K_M", temperature=0.0)
+                    response = self.client.invoke(prompt)
+                    result = response.content if hasattr(response, 'content') else str(response)
+                else:
+                    raise
         else:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -266,23 +308,47 @@ class Extractor:
         """
         print(f"Sending request to LLM for keyword extraction...")
         from langchain_google_genai import ChatGoogleGenerativeAI
-        if isinstance(self.client, ChatGoogleGenerativeAI):
-            response = self.client.invoke(prompt)
-            raw_content = response.content if hasattr(response, 'content') else str(response)
-            # Ensure raw_content is a string
-            if not isinstance(raw_content, str):
-                raw_content = str(raw_content)
-            # Try to extract JSON from the response
+        if isinstance(self.client, ChatGoogleGenerativeAI) or isinstance(self.client, ChatOllama):
             try:
-                json_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
-                if not json_match:
-                    return ["Error: No JSON object found in LLM response."]
-                json_str = json_match.group(0)
-                json_str = re.sub(r',\s*([\}\]])', r'\1', json_str)
-                data = json.loads(json_str)
-                return data.get("keywords", [])
-            except Exception:
-                return ["Error parsing keywords from LLM response."]
+                response = self.client.invoke(prompt)
+                raw_content = response.content if hasattr(response, 'content') else str(response)
+                # Ensure raw_content is a string
+                if not isinstance(raw_content, str):
+                    raw_content = str(raw_content)
+                # Try to extract JSON from the response
+                try:
+                    json_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
+                    if not json_match:
+                        return ["Error: No JSON object found in LLM response."]
+                    json_str = json_match.group(0)
+                    json_str = re.sub(r',\s*([\}\]])', r'\1', json_str)
+                    data = json.loads(json_str)
+                    return data.get("keywords", [])
+                except Exception:
+                    return ["Error parsing keywords from LLM response."]
+            except Exception as e:
+                err_str = str(e).lower()
+                if "quota" in err_str or "429" in err_str or "resourceexhausted" in err_str:
+                    print("Quota hit or rate limited in Extractor. Switching to local Llama 3 model...")
+                    self.client = ChatOllama(model="llama3:8b-instruct-q4_K_M", temperature=0.0)
+                    response = self.client.invoke(prompt)
+                    raw_content = response.content if hasattr(response, 'content') else str(response)
+                    # Ensure raw_content is a string
+                    if not isinstance(raw_content, str):
+                        raw_content = str(raw_content)
+                    # Try to extract JSON from the response
+                    try:
+                        json_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
+                        if not json_match:
+                            return ["Error: No JSON object found in LLM response."]
+                        json_str = json_match.group(0)
+                        json_str = re.sub(r',\s*([\}\]])', r'\1', json_str)
+                        data = json.loads(json_str)
+                        return data.get("keywords", [])
+                    except Exception:
+                        return ["Error parsing keywords from LLM response."]
+                else:
+                    raise
         else:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -298,3 +364,120 @@ class Extractor:
                 return data.get("keywords", [])
             except (json.JSONDecodeError, AttributeError):
                 return ["Error parsing keywords from LLM response."]
+
+    def find_contradictions(self, text_a: str, title_a: str, text_b: str, title_b: str, topic: str) -> str:
+        """Uses a powerful LLM to perform a deep comparative analysis between two texts."""
+        prompt = f"""
+        You are a highly-attentive and critical scientific analyst. Your task is to find conflicting or contradictory results between two research papers on a specific topic.
+
+        **Topic of Interest:** {topic}
+
+        **Paper A: \"{title_a}\"**
+        ---
+        {text_a[:20000]}
+        ---
+
+        **Paper B: \"{title_b}\"**
+        ---
+        {text_b[:20000]}
+        ---
+
+        **Analysis Instructions:**
+        1.  First, carefully read both paper texts, paying close attention to any claims, results, or data related to the **Topic of Interest**.
+        2.  Identify the main claim or result from Paper A on the topic.
+        3.  Identify the main claim or result from Paper B on the topic.
+        4.  Compare these two claims. Do they contradict each other? Do they report different numerical results for the same experiment? Do they propose opposing theories?
+        5.  Formulate a final answer that clearly states whether a conflict exists.
+            - If a conflict IS found, explain the conflict precisely, quoting data or claims from both papers.
+            - If NO conflict is found, state that clearly and explain how their findings are consistent or orthogonal.
+            - If one or both papers do not discuss the topic, state that.
+        """
+        print(f"Sending request to LLM for contradiction analysis on topic: '{topic}'...")
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        if isinstance(self.client, ChatGoogleGenerativeAI) or isinstance(self.client, ChatOllama):
+            try:
+                response = self.client.invoke(prompt)
+                result = response.content if hasattr(response, 'content') else str(response)
+            except Exception as e:
+                err_str = str(e).lower()
+                if "quota" in err_str or "429" in err_str or "resourceexhausted" in err_str:
+                    print("Quota hit or rate limited in Extractor. Switching to local Llama 3 model...")
+                    self.client = ChatOllama(model="llama3:8b-instruct-q4_K_M", temperature=0.0)
+                    response = self.client.invoke(prompt)
+                    result = response.content if hasattr(response, 'content') else str(response)
+                else:
+                    raise
+        else:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1
+            )
+            result = response.choices[0].message.content
+        if not isinstance(result, str):
+            if isinstance(result, list):
+                result = "\n".join(str(item) for item in result)
+            else:
+                result = str(result)
+        if result is None:
+            result = ""
+        return result
+
+    def find_literature_gaps(self, papers: list[dict[str, str]], topic: str) -> str:
+        """Uses a powerful LLM to analyze a collection of paper summaries and find research gaps."""
+        # Create a consolidated string of all paper summaries/abstracts
+        consolidated_text = ""
+        for i, paper in enumerate(papers):
+            # We use a summary of the text to fit more papers into context
+            summary = self.summarize_paper_text(paper['text'], paper['title'])
+            consolidated_text += f"--- Paper {i+1}: {paper['title']} ---\n"
+            consolidated_text += summary + "\n\n"
+
+        prompt = f"""
+        You are a world-class research strategist and tenured professor in computer science.
+        You have been given summaries of several top papers in the field of '{topic}'.
+        Your task is to perform a deep analysis of this collection and identify promising, unaddressed research gaps.
+
+        **Collected Research Summaries:**
+        ---
+        {consolidated_text}
+        ---
+
+        **Analysis Instructions:**
+        1.  **Synthesize Common Themes:** What are the recurring methods, datasets, and problems that these papers address?
+        2.  **Identify the Boundaries:** What are the limitations acknowledged by the authors themselves? What are the edges of the current state-of-the-art according to these papers?
+        3.  **Think Orthogonally:** What is being ignored? Are there different domains, datasets, or ethical considerations that are not being addressed? Are there assumptions everyone is making that could be challenged?
+        4.  **Propose Future Work:** Based on your analysis, propose 2-3 specific, novel, and impactful research questions that could form the basis of a new paper. For each question, briefly explain why it is a valuable direction.
+
+        Formulate your output as a structured report.
+        """
+        print(f"Sending request to LLM for literature gap analysis on topic: '{topic}'...")
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        if isinstance(self.client, ChatGoogleGenerativeAI) or isinstance(self.client, ChatOllama):
+            try:
+                response = self.client.invoke(prompt)
+                result = response.content if hasattr(response, 'content') else str(response)
+            except Exception as e:
+                err_str = str(e).lower()
+                if "quota" in err_str or "429" in err_str or "resourceexhausted" in err_str:
+                    print("Quota hit or rate limited in Extractor. Switching to local Llama 3 model...")
+                    self.client = ChatOllama(model="llama3:8b-instruct-q4_K_M", temperature=0.0)
+                    response = self.client.invoke(prompt)
+                    result = response.content if hasattr(response, 'content') else str(response)
+                else:
+                    raise
+        else:
+            response = self.client.chat.completions.create(
+                model="gemini-1.5-pro-latest",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.5
+            )
+            result = response.choices[0].message.content
+        if not isinstance(result, str):
+            if isinstance(result, list):
+                result = "\n".join(str(item) for item in result)
+            else:
+                result = str(result)
+        if result is None:
+            result = ""
+        return result

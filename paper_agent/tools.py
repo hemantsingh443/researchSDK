@@ -603,15 +603,18 @@ class DynamicVisualizationTool(BaseTool):
             return str(code_generation_response.content)
 
     def clean_generated_code(self, code: str) -> str:
-        """Removes forbidden lines (imports, df creation, pd/plt redefinitions, empty lines, markdown, non-printable chars) from generated code."""
+        """Removes forbidden lines (imports, df creation, pd/plt redefinitions, empty lines, markdown, non-printable chars) from generated code. Injects 'import numpy as np' if needed."""
         import re
         lines = code.splitlines()
         cleaned = []
+        np_needed = False
         for line in lines:
             stripped = line.strip()
             if not stripped:
                 continue
             if stripped.startswith('import'):
+                if 'numpy' in stripped and 'as np' in stripped:
+                    np_needed = False  # Already present
                 continue
             if stripped.startswith('df ='):
                 continue
@@ -622,10 +625,15 @@ class DynamicVisualizationTool(BaseTool):
             # Remove markdown code block markers
             if stripped.startswith('```') or stripped.endswith('```'):
                 continue
+            if 'np.' in stripped:
+                np_needed = True
             cleaned.append(line)
         cleaned_code = '\n'.join(cleaned)
         # Remove non-printable and non-ASCII characters
         cleaned_code = re.sub(r'[^\x20-\x7E\n\t]', '', cleaned_code)
+        # Inject import if needed
+        if np_needed and 'import numpy as np' not in cleaned_code:
+            cleaned_code = 'import numpy as np\n' + cleaned_code
         return cleaned_code
 
     # --- NEW HELPER FUNCTION for safe code execution ---
@@ -633,6 +641,7 @@ class DynamicVisualizationTool(BaseTool):
         """
         Executes Python code in a controlled environment.
         Captures stdout, stderr, and any exceptions.
+        Always provides 'np' (numpy) in the local scope.
         """
      
         buffer = StringIO()
@@ -641,7 +650,8 @@ class DynamicVisualizationTool(BaseTool):
         local_scope = {
             'df': df,
             'pd': pd,
-            'plt': plt
+            'plt': plt,
+            'np': np
         }
         
         try:
@@ -699,3 +709,139 @@ class DynamicVisualizationTool(BaseTool):
 
         except Exception as e:
             return f"An error occurred in the tool's main logic: {e}"
+
+# --- Tool for Contradiction/Conflicting Results Analysis ---
+class ContradictionInput(BaseModel):
+    paper_a_id: str = Field(description="The ID of the first paper for comparison.")
+    paper_b_id: str = Field(description="The ID of the second paper for comparison.")
+    topic: str = Field(description="The specific topic, dataset, or claim to check for contradictions (e.g., 'performance on the SQuAD 2.0 dataset').")
+
+class ConflictingResultsTool(BaseTool):
+    """
+    Analyzes two papers to find contradictory or conflicting results on a specific topic.
+    This is a powerful tool for critical analysis.
+    """
+    name: str = "conflicting_results_tool"
+    description: str = (
+        "Use this tool to find and explain conflicting or contradictory findings between two specific papers. "
+        "You must provide the two paper IDs and the topic of conflict."
+    )
+    args_schema: Type[ContradictionInput] = ContradictionInput
+    kb: KnowledgeBase
+    extractor: Extractor # Uses an LLM for the analysis
+
+    def _run(self, paper_a_id: str, paper_b_id: str, topic: str) -> str:
+        # Fetch text for both papers
+        try:
+            result_a = self.kb.collection.get(where={"paper_id": paper_a_id})
+            result_b = self.kb.collection.get(where={"paper_id": paper_b_id})
+            documents_a = (result_a['documents'] if result_a and result_a.get('documents') else []) or []
+            text_a = " ".join(str(doc) for doc in documents_a if doc is not None)
+            metadatas_a = (result_a['metadatas'] if result_a and result_a.get('metadatas') else []) or []
+            meta_a = metadatas_a[0] if metadatas_a else {}
+            title_a = str(meta_a.get('title')) if meta_a.get('title') is not None else str(paper_a_id)
+
+            documents_b = (result_b['documents'] if result_b and result_b.get('documents') else []) or []
+            text_b = " ".join(str(doc) for doc in documents_b if doc is not None)
+            metadatas_b = (result_b['metadatas'] if result_b and result_b.get('metadatas') else []) or []
+            meta_b = metadatas_b[0] if metadatas_b else {}
+            title_b = str(meta_b.get('title')) if meta_b.get('title') is not None else str(paper_b_id)
+        except (IndexError, TypeError, KeyError):
+            return "Error: Could not retrieve one or both papers from the knowledge base. Please verify the paper IDs."
+        
+        if not text_a or not text_b:
+            return "Error: Could not retrieve the full text for one or both papers."
+
+        # Call a new method on our extractor for comparative analysis
+        analysis = self.extractor.find_contradictions(text_a, title_a, text_b, title_b, topic)
+        return analysis
+
+class LiteratureGapInput(BaseModel):
+    topic: str = Field(description="The central research topic to analyze for gaps.")
+    num_papers_to_analyze: int = Field(default=5, description="The number of top papers on the topic to include in the analysis.")
+
+class LiteratureGapTool(BaseTool):
+    """
+    Analyzes a collection of top papers on a given topic to identify potential
+    gaps in the literature and suggest future research directions.
+    """
+    name: str = "literature_gap_tool"
+    description: str = (
+        "A powerful research tool. Use this to analyze the current state of a research field "
+        "and get suggestions for novel future work. Operates on a collection of papers."
+    )
+    args_schema: Type[LiteratureGapInput] = LiteratureGapInput
+    kb: KnowledgeBase
+    extractor: Extractor
+
+    def _run(self, topic: str, num_papers_to_analyze: int = 5) -> str:
+        # 1. Find the top N papers on the topic using our vector search
+        search_results = self.kb.search(query=topic, n_results=num_papers_to_analyze * 5) # Get extra to find unique papers
+        
+        # 2. Collect the unique papers and their text
+        paper_texts = {} # Use dict to handle uniqueness
+        ids = search_results.get('ids', [[]])[0] if search_results.get('ids') else []
+        metadatas = search_results.get('metadatas', [[]])[0] if search_results.get('metadatas') else []
+        for i in range(min(len(ids), len(metadatas))):
+            paper_id = metadatas[i].get('paper_id')
+            if not paper_id:
+                continue
+            if paper_id not in paper_texts and len(paper_texts) < num_papers_to_analyze:
+                title = metadatas[i].get('title', paper_id)
+                doc_result = self.kb.collection.get(where={"paper_id": paper_id})
+                documents = doc_result.get('documents') if doc_result else None
+                if documents and isinstance(documents, list):
+                    text = " ".join(str(doc) for doc in documents if doc is not None)
+                else:
+                    text = ""
+                paper_texts[paper_id] = {"title": title, "text": text}
+
+        if len(paper_texts) < 2:
+            return "Could not find enough relevant papers in the knowledge base to perform a gap analysis."
+
+        # 3. Call a new, powerful method on the extractor
+        analysis = self.extractor.find_literature_gaps(list(paper_texts.values()), topic)
+        return analysis
+
+# --- THE FINAL TOOL: JSON to CSV Exporter ---
+class CsvExportInput(BaseModel):
+    """Input model for the CSV Export Tool."""
+    json_data: str = Field(description="A JSON string with 'columns' and 'data' keys, representing the table data.")
+    filename: str = Field(description="The filename to save the CSV to (e.g., 'performance_data.csv').")
+
+class DataToCsvTool(BaseTool):
+    """
+    A utility tool to save structured JSON data into a CSV file.
+    This is useful for exporting extracted tables for further analysis in other programs.
+    """
+    name: str = "data_to_csv_tool"
+    description: str = (
+        "Use this tool to save structured table data (in JSON format) to a CSV file. "
+        "This is the final step after you have extracted a table."
+    )
+    args_schema: Type[CsvExportInput] = CsvExportInput
+
+    def _run(self, json_data: str, filename: str) -> str:
+        """Use the tool."""
+        try:
+            # Clean the JSON string, just in case
+            if json_data.startswith("```json"):
+                json_data = json_data.split("```json")[1].split("````")[0].strip()
+            elif json_data.startswith("```"):
+                json_data = json_data.split("```")[1].split("```")[0].strip()
+
+            # Load the JSON and create a DataFrame
+            data = json.loads(json_data)
+            df = pd.DataFrame(data['data'], columns=data['columns'])
+
+            # Save to CSV
+            df.to_csv(filename, index=False)
+
+            return f"Successfully saved data to '{filename}'."
+        except Exception as e:
+            return f"Error saving data to CSV: {e}"
+
+    async def _arun(self, json_data: str, filename: str) -> str:
+        raise NotImplementedError("This tool does not support async yet.")
+
+# TODO: Implementing a dedicated report synthesis tool that can combine paper summary, table data, and references to files/visualizations for comprehensive reporting.

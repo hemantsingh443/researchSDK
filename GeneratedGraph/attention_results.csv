@@ -1,0 +1,11 @@
+Model,BLEU,Training Cost (FLOPs)
+ByteNet [18],23.75,
+Deep-Att + PosUnk [39],39.2,1e+20
+GNMT + RL [38],24.6,2.3e+19
+ConvS2S [9],25.16,9.6e+18
+MoE [32],26.03,2e+19
+Deep-Att + PosUnk Ensemble [39],40.4,8e+20
+GNMT + RL Ensemble [38],26.3,1.8e+20
+ConvS2S Ensemble [9],26.36,7.7e+19
+Transformer (base model),27.3,3.3e+18
+Transformer (big),28.4,2.3e+19

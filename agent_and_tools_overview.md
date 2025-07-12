@@ -61,6 +61,18 @@ This document provides an overview of the core agents and tools in the scientifi
 - **Purpose:** Explains the relationship between two papers using graph queries and LLM synthesis.
 - **Usage:** Clarifies citation paths, collaborations, and research influence.
 
+### 10. **conflicting_results_tool**
+- **Purpose:** Analyzes two papers to find and explain conflicting or contradictory findings on a specific topic.
+- **Usage:** Used for critical comparison of results, claims, or data between two papers (e.g., "Do these papers report different results on the same benchmark?").
+
+### 11. **literature_gap_tool**
+- **Purpose:** Analyzes a collection of top papers on a given topic to identify gaps in the literature and suggest future research directions.
+- **Usage:** Used to synthesize the current state of research and propose novel, impactful research questions.
+
+### 12. **data_to_csv_tool**
+- **Purpose:** Exports structured table data (in JSON format) to a CSV file for further analysis or sharing.
+- **Usage:** Used after table extraction to save results in a format compatible with spreadsheets and data analysis tools.
+
 ---
 
 ## How Agents and Tools Interact
@@ -71,4 +83,4 @@ This document provides an overview of the core agents and tools in the scientifi
 
 ---
 
-This architecture enables flexible, robust, and intelligent automation of scientific research workflows, from literature search to data extraction, analysis, and visualization. 
+This architecture enables flexible, robust, and intelligent automation of scientific research workflows, from literature search to data extraction, analysis, visualization, contradiction analysis, literature gap detection, and data export. 

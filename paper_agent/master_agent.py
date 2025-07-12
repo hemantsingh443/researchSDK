@@ -2,7 +2,7 @@ from .agent import PaperAgent as WorkerAgent # Our ReAct agent is now the worker
 from langchain_core.language_models.chat_models import BaseChatModel
 from typing import Dict, Any
 import json
-import re 
+from langchain_community.chat_models import ChatOllama
 
 class MasterAgent:
     """
@@ -28,22 +28,26 @@ class MasterAgent:
     def _clean_and_parse_json(self, json_string: str) -> Dict[str, Any]:
         """
         A robust function to clean and parse a JSON string from an LLM response.
-        It handles markdown code blocks and other common LLM artifacts.
+        It handles markdown code blocks, extra text, and other common LLM artifacts.
         """
+        import re
         # Remove markdown code block wrappers (```json ... ```)
         if json_string.startswith("```json"):
-            json_string = json_string[7:] # Remove ```json
+            json_string = json_string[7:]
             if json_string.endswith("```"):
-                json_string = json_string[:-3] # Remove ```
-        # Sometimes models just use ``` ... ```
+                json_string = json_string[:-3]
         if json_string.startswith("```"):
             json_string = json_string[3:]
             if json_string.endswith("```"):
                 json_string = json_string[:-3]
-        # Strip any leading/trailing whitespace
         json_string = json_string.strip()
-        # Now, try to parse the cleaned string
-        return json.loads(json_string)
+        # Use regex to extract the first JSON object
+        match = re.search(r'\{.*\}', json_string, re.DOTALL)
+        if match:
+            json_str = match.group(0)
+            return json.loads(json_str)
+        else:
+            raise ValueError("No JSON object found in LLM response.")
 
     def run(self, user_query: str):
         """The main loop of the Master Agent, now with a final synthesis step."""
@@ -59,7 +63,16 @@ class MasterAgent:
             master_prompt = self._create_master_prompt(state)
             
             print("MasterAgent is thinking...")
-            llm_response_str = self.llm.invoke(master_prompt).content
+            try:
+                llm_response_str = self.llm.invoke(master_prompt).content
+            except Exception as e:
+                err_str = str(e).lower()
+                if "quota" in err_str or "429" in err_str or "resourceexhausted" in err_str:
+                    print("Quota hit or rate limited. Switching to local Llama 3 model...")
+                    self.llm = ChatOllama(model="llama3:8b-instruct-q4_K_M", temperature=0.0)
+                    llm_response_str = self.llm.invoke(master_prompt).content
+                else:
+                    raise
             
             try:
                 response_str = llm_response_str
@@ -79,8 +92,16 @@ class MasterAgent:
 
             print(f"Thought: {thought}")
 
-            action_name = action_json.get("action")
-            action_input = action_json.get("action_input")
+            # 2. ACT
+            if isinstance(action_json, dict):
+                action_name = action_json.get("action")
+                action_input = action_json.get("action_input")
+            elif isinstance(action_json, str):
+                action_name = action_json
+                action_input = None
+            else:
+                action_name = None
+                action_input = None
 
             # If the agent decides it's done, we break the loop and move to synthesis.
             if action_name == "Final Answer":
@@ -94,15 +115,18 @@ class MasterAgent:
                 })
                 break
 
-            print(f"MasterAgent directs worker to execute: {action_name}")
-            worker_response = self.worker_agent.run_single_tool(action_name, action_input)
-            
-            state["completed_steps"].append({
-                "step": i + 1,
-                "thought": thought,
-                "action_taken": action_json,
-                "observation": worker_response
-            })
+            if isinstance(action_name, str) and action_name:
+                print(f"MasterAgent directs worker to execute: {action_name}")
+                worker_response = self.worker_agent.run_single_tool(action_name, action_input)
+                state["completed_steps"].append({
+                    "step": i + 1,
+                    "thought": thought,
+                    "action_taken": action_json,
+                    "observation": worker_response
+                })
+            else:
+                print("Invalid or missing action name. Skipping this step.")
+                break
         else: # This 'else' belongs to the 'for' loop
             print("MasterAgent reached maximum loops.")
 

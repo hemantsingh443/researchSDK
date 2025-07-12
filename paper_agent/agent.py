@@ -17,11 +17,14 @@ from .tools import (
     TableExtractionTool,   
     RelationshipAnalysisTool,
     DynamicVisualizationTool,
-    CitationAnalysisTool,   # <-- Add import
-    KeywordExtractionTool   # <-- Add import
+    CitationAnalysisTool,   
+    KeywordExtractionTool,  
+    ConflictingResultsTool,
+    LiteratureGapTool,
+    DataToCsvTool 
 )
 from .extractor import Extractor
-from langchain_google_genai import ChatGoogleGenerativeAI # <-- NEW IMPORT
+from langchain_google_genai import ChatGoogleGenerativeAI 
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -161,7 +164,7 @@ class PaperAgent:
         if llm_provider == "google":
             if not os.getenv("GOOGLE_API_KEY"):
                 raise ValueError("GOOGLE_API_KEY not found in environment variables.")
-            llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.1)
+            llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash-lite", temperature=0.1)
         elif llm_provider == "local":
             llm = ChatOllama(
                 model="llama3:8b-instruct-q4_K_M",
@@ -176,7 +179,7 @@ class PaperAgent:
         # The KnowledgeBase now takes the Neo4j credentials
         self.kb = KnowledgeBase(db_path=db_path, neo4j_uri=neo4j_uri, neo4j_user=neo4j_user, neo4j_password=neo4j_password)
         if llm_provider == "google":
-            extractor_model = "gemini-1.5-flash"
+            extractor_model = "gemini-2.0-flash-lite"
             extractor_api_type = "google"
         else:
             extractor_model = "llama3:8b-instruct-q4_K_M"
@@ -194,17 +197,31 @@ class PaperAgent:
         # 4. Initialize the tool suite, including the new graph tool
         self.tools = [
             web_search_tool,
-            GraphPaperFinderTool(graph=graph), # <-- REPLACE THE OLD FINDER
-            QuestionAnsweringTool(rag_agent=rag_sub_agent), # <-- The "smart" RAG tool
-            GraphQueryTool(graph=graph), # <-- ADD NEW TOOL
+            GraphPaperFinderTool(graph=graph), 
+            QuestionAnsweringTool(rag_agent=rag_sub_agent), 
+            GraphQueryTool(graph=graph), 
             ArxivSearchTool(ingestor=self.ingestor, kb=self.kb),
             ArxivFetchTool(ingestor=self.ingestor, kb=self.kb),
             PaperSummarizationTool(kb=self.kb, extractor=self.extractor),
             TableExtractionTool(kb=self.kb, extractor=self.extractor),
             RelationshipAnalysisTool(graph=graph, llm=llm),
-            CitationAnalysisTool(graph=graph),              # <-- Add citation analysis tool
-            KeywordExtractionTool(kb=self.kb, extractor=self.extractor), # <-- Add keyword extraction tool
-            DynamicVisualizationTool(code_writing_llm=llm)
+            CitationAnalysisTool(graph=graph),             
+            KeywordExtractionTool(kb=self.kb, extractor=self.extractor), 
+            DynamicVisualizationTool(code_writing_llm=llm),
+            # --- NEW TOOLS ---
+            ConflictingResultsTool(
+                name="conflicting_results_tool",
+                description="Use this tool to find and explain conflicting or contradictory findings between two specific papers. You must provide the two paper IDs and the topic of conflict.",
+                kb=self.kb,
+                extractor=self.extractor
+            ),
+            LiteratureGapTool(
+                name="literature_gap_tool",
+                description="A powerful research tool. Use this to analyze the current state of a research field and get suggestions for novel future work. Operates on a collection of papers.",
+                kb=self.kb,
+                extractor=self.extractor
+            ),
+            DataToCsvTool() 
         ]
         tool_names = ", ".join([str(t.name) for t in self.tools if t.name])
         print(f"Tools Initialized: [{tool_names}]")
@@ -218,10 +235,7 @@ class PaperAgent:
             tools=self.tools,
             verbose=True,
             handle_parsing_errors=True,
-            max_iterations=3, # <-- Let's reduce this slightly
-            # --- THE FINAL FIX ---
-            # This tells the agent that if the LLM outputs something that isn't a tool
-            # or a final answer, just return that output directly. This stops loops.
+            max_iterations=3, 
             return_intermediate_steps=False,
             early_stopping_method="force"
         )
@@ -239,18 +253,24 @@ class PaperAgent:
             def run_query(self, user_query):
                 context_str = ""
                 search_results = self.kb.search(query=user_query, n_results=3)
-                
-                # --- THE TWEAK ---
-                # Add the metadata, including the crucial paper_id, to the context string.
                 for i in range(len(search_results['ids'][0])):
                     doc = search_results['documents'][0][i]
                     meta = search_results['metadatas'][0][i]
                     context_str += f"--- Context Snippet {i+1} ---\n"
-                    context_str += f"Source Metadata: {meta}\n" # <-- ADD THIS LINE
+                    context_str += f"Source Metadata: {meta}\n"
                     context_str += f"Content: {doc}\n\n"
                 
                 prompt = f"Answer the user's question based ONLY on the provided context, which includes metadata and content for each snippet:\n<context>\n{context_str}\n</context>\n\nQuestion: {user_query}"
-                response = self.llm.invoke(prompt)
+                try:
+                    response = self.llm.invoke(prompt)
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if "quota" in err_str or "429" in err_str or "resourceexhausted" in err_str:
+                        print("Quota hit or rate limited in RAG. Switching to local Llama 3 model...")
+                        self.llm = ChatOllama(model="llama3:8b-instruct-q4_K_M", temperature=0.0)
+                        response = self.llm.invoke(prompt)
+                    else:
+                        raise
                 return response.content
         
         return TempRAGAgent(self.kb, llm, getattr(llm, "model", "unknown"))

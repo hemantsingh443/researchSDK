@@ -1,6 +1,6 @@
 from .agent import PaperAgent as ReActAgent 
-from langchain_openai import ChatOpenAI
 from typing import List, Dict
+from langchain_community.chat_models import ChatOllama
 
 class PlanningAgent:
     """
@@ -53,16 +53,39 @@ class PlanningAgent:
         """
         
         print("\n--- Generating Plan (with reflection) ---")
-        response = self.planner_llm.invoke(prompt)
+        try:
+            response = self.planner_llm.invoke(prompt)
+        except Exception as e:
+            err_str = str(e).lower()
+            if "quota" in err_str or "429" in err_str or "resourceexhausted" in err_str:
+                print("Quota hit or rate limited in planner. Switching to local Llama 3 model...")
+                self.planner_llm = ChatOllama(model="llama3:8b-instruct-q4_K_M", temperature=0.0)
+                response = self.planner_llm.invoke(prompt)
+            else:
+                raise
         plan_str = response.content
         
         # More robust parsing of the plan
         plan = []
-        for line in plan_str.split('\n'):
+        if isinstance(plan_str, str):
+            lines = plan_str.split('\n')
+        elif isinstance(plan_str, list):
+            lines = plan_str
+        else:
+            lines = [str(plan_str)]
+        for line in lines:
+            if not isinstance(line, str):
+                line = str(line)
             line = line.strip()
             if line and line[0].isdigit():
-                # Remove the leading number and period
-                plan.append(line.split('. ', 1)[1])
+                # Remove the leading number and period (handles "1. ", "2. ", "3) ", etc.)
+                split_line = line.split('.', 1)
+                if len(split_line) > 1:
+                    step = split_line[1].lstrip(" )-")
+                    plan.append(step)
+                else:
+                    # Fallback: just remove the first character (the digit)
+                    plan.append(line[1:].lstrip(" )-."))
         
         print("--- Plan Created ---")
         for i, step in enumerate(plan):
@@ -124,7 +147,16 @@ Write the report in clear, professional language.
 """
         
         print("\n--- Generating Final Synthesis ---")
-        final_answer = self.planner_llm.invoke(final_synthesis_prompt).content
+        try:
+            final_answer = self.planner_llm.invoke(final_synthesis_prompt).content
+        except Exception as e:
+            err_str = str(e).lower()
+            if "quota" in err_str or "429" in err_str or "resourceexhausted" in err_str:
+                print("Quota hit or rate limited in final synthesis. Switching to local Llama 3 model...")
+                self.planner_llm = ChatOllama(model="llama3:8b-instruct-q4_K_M", temperature=0.0)
+                final_answer = self.planner_llm.invoke(final_synthesis_prompt).content
+            else:
+                raise
         if isinstance(final_answer, list):
             final_answer = "\n".join(
                 str(item) if not isinstance(item, str) else item
