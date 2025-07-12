@@ -1,0 +1,26 @@
+# Core Agent Libraries
+langchain
+langchain-openai
+langchain-google-genai
+langchain-neo4j
+langchainhub
+pydantic
+python-dotenv
+openai
+arxiv
+neo4j
+chromadb
+sentence-transformers
+tiktoken 
+langchain_community
+tqdm 
+PyMuPDF 
+duckduckgo-search
+
+# Web Server
+fastapi
+uvicorn[standard]
+
+# Data & Plotting
+pandas
+matplotlib

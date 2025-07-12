@@ -154,7 +154,7 @@ class PaperAgent:
     An agentic system that can reason and use a suite of tools
     to accomplish complex research tasks.
     """
-    def __init__(self, db_path: str = "./paper_db", llm_provider: str = "google", neo4j_uri = "neo4j://172.20.128.55:7687", neo4j_user="neo4j", neo4j_password="password"):
+    def __init__(self, llm_provider: str = "google"):
         """
         Initializes the agent, its tools, and the agent executor.
         """
@@ -176,8 +176,12 @@ class PaperAgent:
 
         # 2. Initialize our core components
         self.ingestor = Ingestor()
-        # The KnowledgeBase now takes the Neo4j credentials
-        self.kb = KnowledgeBase(db_path=db_path, neo4j_uri=neo4j_uri, neo4j_user=neo4j_user, neo4j_password=neo4j_password)
+        # Read Neo4j and ChromaDB credentials from environment variables
+        neo4j_uri = os.getenv("NEO4J_URI", "neo4j://localhost:7687")
+        neo4j_user = os.getenv("NEO4J_USER", "neo4j")
+        neo4j_password = os.getenv("NEO4J_PASSWORD", "password")
+        chroma_db_path = os.getenv("CHROMA_DB_PATH", "./paper_db")
+        self.kb = KnowledgeBase(db_path=chroma_db_path, neo4j_uri=neo4j_uri, neo4j_user=neo4j_user, neo4j_password=neo4j_password)
         if llm_provider == "google":
             extractor_model = "gemini-2.0-flash-lite"
             extractor_api_type = "google"
