@@ -2,7 +2,6 @@ from langchain_neo4j import Neo4jGraph
 from langchain.tools import BaseTool, DuckDuckGoSearchRun
 from typing import Type, Any
 from pydantic import BaseModel, Field
-
 import pandas as pd
 import matplotlib.pyplot as plt
 from io import StringIO
@@ -11,7 +10,6 @@ import numpy as np
 import os
 from langchain_core.language_models.chat_models import BaseChatModel 
 import shutil
-
 from .knowledge_base import KnowledgeBase
 from .ingestor import Ingestor
 from .extractor import Extractor
@@ -111,6 +109,29 @@ class PaperSummarizationTool(BaseTool):
         
         if not results or not results.get('documents'):
             return f"Error: Could not find a paper with ID '{paper_id}' in the knowledge base."
+
+      
+        pdf_filename = None
+        if os.path.exists(paper_id) and paper_id.endswith('.pdf'):
+            pdf_filename = os.path.basename(paper_id)
+        elif paper_id.startswith('http') and 'arxiv.org' in paper_id:
+            arxiv_id = paper_id.split('/')[-1].replace('v', 'v')
+            for fname in os.listdir('.'):
+                if fname.startswith(arxiv_id) and fname.endswith('.pdf'):
+                    pdf_filename = fname
+                    break
+        if pdf_filename:
+            artifacts_dir = 'artifacts'
+            dest_path = os.path.join(artifacts_dir, pdf_filename)
+            try:
+                if not os.path.exists(artifacts_dir):
+                    os.makedirs(artifacts_dir)
+                if not os.path.exists(dest_path) and os.path.exists(pdf_filename):
+                    shutil.copy(pdf_filename, dest_path)
+                    print(f"Copied referenced PDF to artifacts: {dest_path}")
+            except Exception as e:
+                print(f"Failed to copy referenced PDF to artifacts: {e}")
+
 
         # Reconstruct the full text and get metadata
         documents = results.get('documents')
@@ -304,6 +325,32 @@ class TableExtractionTool(BaseTool):
         results = self.kb.collection.get(where={"paper_id": paper_id})
         if not results or not results['documents']:
             return f"Error: Could not find paper with ID {paper_id}."
+        
+        pdf_filename = None
+        # If paper_id is a local file path
+        if os.path.exists(paper_id) and paper_id.endswith('.pdf'):
+            pdf_filename = os.path.basename(paper_id)
+        # If paper_id is an arXiv URL, try to infer the PDF filename
+        elif paper_id.startswith('http') and 'arxiv.org' in paper_id:
+            arxiv_id = paper_id.split('/')[-1].replace('v', 'v')
+            # Try to find a matching PDF in known locations
+            for fname in os.listdir('.'):
+                if fname.startswith(arxiv_id) and fname.endswith('.pdf'):
+                    pdf_filename = fname
+                    break
+        # Copy if found and not already in artifacts
+        if pdf_filename:
+            artifacts_dir = 'artifacts'
+            dest_path = os.path.join(artifacts_dir, pdf_filename)
+            try:
+                if not os.path.exists(artifacts_dir):
+                    os.makedirs(artifacts_dir)
+                if not os.path.exists(dest_path) and os.path.exists(pdf_filename):
+                    shutil.copy(pdf_filename, dest_path)
+                    print(f"Copied referenced PDF to artifacts: {dest_path}")
+            except Exception as e:
+                print(f"Failed to copy referenced PDF to artifacts: {e}")
+        # --- END PDF COPY LOGIC ---
         
         full_text = " ".join(results['documents'])
         metadatas = results.get('metadatas')

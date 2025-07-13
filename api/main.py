@@ -26,6 +26,7 @@ class QueryRequest(BaseModel):
 class QueryResponse(BaseModel):
     report: str
     artifacts: list[str] = []
+    thought_process: list[dict] = []
 
 
 @app.post("/execute-query", response_model=QueryResponse)
@@ -35,12 +36,10 @@ async def execute_query(request: QueryRequest):
     """
     try:
         print(f"Received query: {request.query}")
-        final_report = master_agent.run(request.query)
-        
-    
+        # Modified: get both the final report and the thought process
+        final_report, thought_process = master_agent.run_with_thoughts(request.query)
         generated_artifacts = [f for f in os.listdir('./artifacts') if os.path.isfile(os.path.join('./artifacts', f))]
-
-        return {"report": final_report, "artifacts": generated_artifacts}
+        return {"report": final_report, "artifacts": generated_artifacts, "thought_process": thought_process}
     except Exception as e:
         print(f"An error occurred: {e}")
         raise HTTPException(status_code=500, detail=str(e))
