@@ -16,6 +16,7 @@ langchain_community
 tqdm 
 PyMuPDF 
 duckduckgo-search 
+graphviz
 
 # Web Server
 fastapi

@@ -17,6 +17,7 @@ from .tools import (
     TableExtractionTool,   
     RelationshipAnalysisTool,
     DynamicVisualizationTool,
+    ArchitectureDiagramTool,  
     CitationAnalysisTool,   
     KeywordExtractionTool,  
     ConflictingResultsTool,
@@ -212,6 +213,7 @@ class PaperAgent:
             CitationAnalysisTool(graph=graph),             
             KeywordExtractionTool(kb=self.kb, extractor=self.extractor), 
             DynamicVisualizationTool(code_writing_llm=llm),
+            ArchitectureDiagramTool(),  # <-- Register the new tool here
             # --- NEW TOOLS ---
             ConflictingResultsTool(
                 name="conflicting_results_tool",

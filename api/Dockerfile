@@ -9,7 +9,16 @@ COPY ./requirements.txt .
 
 # Install any needed packages specified in requirements.txt
 # --no-cache-dir makes the image smaller
-RUN pip install -r requirements.txt
+RUN pip install -r requirements.txt 
+
+# Install Node.js 20.x, npm, Mermaid CLI, Graphviz, and Chrome dependencies
+RUN apt-get update && \
+    apt-get install -y curl graphviz fonts-liberation libnss3 libatk-bridge2.0-0 libgtk-3-0 libxss1 libasound2 libgbm1 && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    npm install -g @mermaid-js/mermaid-cli && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy the rest of the application code into the container
 COPY . .

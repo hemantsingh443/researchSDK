@@ -17,7 +17,7 @@ app = FastAPI(
 print("--- Initializing Master Agent for API ---")
 worker_agent = WorkerAgent(llm_provider="google")
 master_llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash-lite", temperature=0.0) 
-master_agent = MasterAgent(worker_agent=worker_agent, llm=master_llm, max_loops=15)
+master_agent = MasterAgent(worker_agent=worker_agent, llm=master_llm, max_loops=20)
 print("--- Master Agent is Online and Ready ---")
 
 class QueryRequest(BaseModel):

@@ -110,28 +110,41 @@ class PaperSummarizationTool(BaseTool):
         if not results or not results.get('documents'):
             return f"Error: Could not find a paper with ID '{paper_id}' in the knowledge base."
 
-      
+        # --- NEW: Copy or Download PDF to artifacts if available ---
+        import shutil, os
         pdf_filename = None
-        if os.path.exists(paper_id) and paper_id.endswith('.pdf'):
-            pdf_filename = os.path.basename(paper_id)
-        elif paper_id.startswith('http') and 'arxiv.org' in paper_id:
-            arxiv_id = paper_id.split('/')[-1].replace('v', 'v')
-            for fname in os.listdir('.'):
-                if fname.startswith(arxiv_id) and fname.endswith('.pdf'):
-                    pdf_filename = fname
-                    break
-        if pdf_filename:
-            artifacts_dir = 'artifacts'
-            dest_path = os.path.join(artifacts_dir, pdf_filename)
-            try:
-                if not os.path.exists(artifacts_dir):
-                    os.makedirs(artifacts_dir)
-                if not os.path.exists(dest_path) and os.path.exists(pdf_filename):
-                    shutil.copy(pdf_filename, dest_path)
-                    print(f"Copied referenced PDF to artifacts: {dest_path}")
-            except Exception as e:
-                print(f"Failed to copy referenced PDF to artifacts: {e}")
-
+        try:
+            if os.path.exists(paper_id) and paper_id.endswith('.pdf'):
+                pdf_filename = os.path.basename(paper_id)
+            elif paper_id.startswith('http') and 'arxiv.org' in paper_id:
+                arxiv_id = paper_id.split('/')[-1].split('v')[0]
+                for fname in os.listdir('.'):
+                    if fname.startswith(arxiv_id) and fname.endswith('.pdf'):
+                        pdf_filename = fname
+                        break
+                if not pdf_filename:
+                    try:
+                        import arxiv
+                        result = next(arxiv.Search(id_list=[arxiv_id]).results())
+                        pdf_path = result.download_pdf()
+                        pdf_filename = os.path.basename(pdf_path)
+                        print(f"Downloaded missing PDF for artifacts: {pdf_filename}")
+                    except Exception as e:
+                        print(f"Failed to download missing PDF for artifacts: {e}")
+            if pdf_filename:
+                artifacts_dir = 'artifacts'
+                dest_path = os.path.join(artifacts_dir, pdf_filename)
+                try:
+                    if not os.path.exists(artifacts_dir):
+                        os.makedirs(artifacts_dir)
+                    if not os.path.exists(dest_path) and os.path.exists(pdf_filename):
+                        shutil.copy(pdf_filename, dest_path)
+                        print(f"Copied referenced PDF to artifacts: {dest_path}")
+                except Exception as e:
+                    print(f"Failed to copy referenced PDF to artifacts: {e}")
+        except Exception as e:
+            print(f"PDF artifact logic error: {e}")
+        # --- END PDF COPY/DOWNLOAD LOGIC ---
 
         # Reconstruct the full text and get metadata
         documents = results.get('documents')
@@ -326,31 +339,44 @@ class TableExtractionTool(BaseTool):
         if not results or not results['documents']:
             return f"Error: Could not find paper with ID {paper_id}."
         
+        # --- NEW: Copy or Download PDF to artifacts if available ---
+        import shutil, os
         pdf_filename = None
-        # If paper_id is a local file path
-        if os.path.exists(paper_id) and paper_id.endswith('.pdf'):
-            pdf_filename = os.path.basename(paper_id)
-        # If paper_id is an arXiv URL, try to infer the PDF filename
-        elif paper_id.startswith('http') and 'arxiv.org' in paper_id:
-            arxiv_id = paper_id.split('/')[-1].replace('v', 'v')
-            # Try to find a matching PDF in known locations
-            for fname in os.listdir('.'):
-                if fname.startswith(arxiv_id) and fname.endswith('.pdf'):
-                    pdf_filename = fname
-                    break
-        # Copy if found and not already in artifacts
-        if pdf_filename:
-            artifacts_dir = 'artifacts'
-            dest_path = os.path.join(artifacts_dir, pdf_filename)
-            try:
-                if not os.path.exists(artifacts_dir):
-                    os.makedirs(artifacts_dir)
-                if not os.path.exists(dest_path) and os.path.exists(pdf_filename):
-                    shutil.copy(pdf_filename, dest_path)
-                    print(f"Copied referenced PDF to artifacts: {dest_path}")
-            except Exception as e:
-                print(f"Failed to copy referenced PDF to artifacts: {e}")
-        # --- END PDF COPY LOGIC ---
+        try:
+            if os.path.exists(paper_id) and paper_id.endswith('.pdf'):
+                pdf_filename = os.path.basename(paper_id)
+            elif paper_id.startswith('http') and 'arxiv.org' in paper_id:
+                arxiv_id = paper_id.split('/')[-1].split('v')[0]
+                # Try to find a matching PDF in known locations
+                for fname in os.listdir('.'):
+                    if fname.startswith(arxiv_id) and fname.endswith('.pdf'):
+                        pdf_filename = fname
+                        break
+                # If not found, try to download it
+                if not pdf_filename:
+                    try:
+                        import arxiv
+                        result = next(arxiv.Search(id_list=[arxiv_id]).results())
+                        pdf_path = result.download_pdf()
+                        pdf_filename = os.path.basename(pdf_path)
+                        print(f"Downloaded missing PDF for artifacts: {pdf_filename}")
+                    except Exception as e:
+                        print(f"Failed to download missing PDF for artifacts: {e}")
+            # Copy if found and not already in artifacts
+            if pdf_filename:
+                artifacts_dir = 'artifacts'
+                dest_path = os.path.join(artifacts_dir, pdf_filename)
+                try:
+                    if not os.path.exists(artifacts_dir):
+                        os.makedirs(artifacts_dir)
+                    if not os.path.exists(dest_path) and os.path.exists(pdf_filename):
+                        shutil.copy(pdf_filename, dest_path)
+                        print(f"Copied referenced PDF to artifacts: {dest_path}")
+                except Exception as e:
+                    print(f"Failed to copy referenced PDF to artifacts: {e}")
+        except Exception as e:
+            print(f"PDF artifact logic error: {e}")
+        # --- END PDF COPY/DOWNLOAD LOGIC ---
         
         full_text = " ".join(results['documents'])
         metadatas = results.get('metadatas')
@@ -578,14 +604,15 @@ class DynamicVisualizationInput(BaseModel):
 
 class DynamicVisualizationTool(BaseTool):
     """
-    An advanced data visualization tool. It takes structured JSON data and a high-level goal,
+    An advanced data visualization tool. It takes structured JSON data (optionally with a 'paper_id' or 'paper_name' column for multi-paper comparison) and a high-level goal,
     and then generates and executes Python code to create the best possible visualization.
     It can create bar charts, line plots, scatter plots, pie charts, violin plots, box plots, histograms, and more.
     """
     name: str = "dynamic_visualization_tool"
     description: str = (
         "Use this tool to create insightful data visualizations from structured JSON data. "
-        "Provide the data and a clear goal for the analysis. Optionally, specify a chart_type ('bar', 'line', 'scatter', 'box', 'violin', 'hist', etc.)."
+        "Provide the data and a clear goal for the analysis. Optionally, specify a chart_type ('bar', 'line', 'scatter', 'box', 'violin', 'hist', etc.). "
+        "If the data includes a 'paper_id' or 'paper_name' column, the tool will group and compare across papers/models."
     )
     args_schema: Type[DynamicVisualizationInput] = DynamicVisualizationInput
     
@@ -728,22 +755,32 @@ class DynamicVisualizationTool(BaseTool):
                 filename = f"artifacts/{filename}"
             data = json.loads(json_data)
             df = pd.DataFrame(data['data'], columns=data['columns'])
+            # --- NEW: Handle multi-paper/model comparison ---
+            group_col = None
             for col in df.columns:
-                if df[col].dtype == 'object' and df[col].nunique() == len(df):
-                    df.set_index(col, inplace=True)
+                if col.lower() in ["paper_id", "paper_name", "model", "model_name"]:
+                    group_col = col
                     break
+            if group_col:
+                # Set group_col as index if not already
+                if df.index.name != group_col:
+                    df.set_index(group_col, inplace=True)
+            else:
+                # Fallback: set first object column with unique values as index
+                for col in df.columns:
+                    if df[col].dtype == 'object' and df[col].nunique() == len(df):
+                        df.set_index(col, inplace=True)
+                        break
             for col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='ignore')
-
+            # --- END NEW LOGIC ---
             generated_code = self._generate_plotting_code(df.head().to_string(), analysis_goal, chart_type)
             if "```python" in generated_code:
                 generated_code = generated_code.split("```python")[1].split("````")[0].strip()
             elif "```" in generated_code:
-                generated_code = generated_code.split("```")[1].split("```")[0].strip()
+                generated_code = generated_code.split("```",1)[1].split("```",1)[0].strip()
             cleaned_code = self.clean_generated_code(generated_code)
             print(f"--- Cleaned Plotting Code (repr) ---\n{repr(cleaned_code)}\n-----------------------------")
-
-            # Try executing the whole code, if syntax error, try line by line
             try:
                 execution_result = self.execute_python_code(cleaned_code, df)
             except SyntaxError as e:
@@ -756,13 +793,10 @@ class DynamicVisualizationTool(BaseTool):
                         print(f"Line {i+1} failed: {repr(line)}\nError: {le}")
                 execution_result = "SyntaxError encountered. See above for details."
             print(f"--- Execution Result ---\n{execution_result}\n------------------------")
-            
-            # Robust artifact move/copy logic
             temp_filenames = ['plot.png', filename.split('/')[-1]]
             moved = False
             for temp_file in temp_filenames:
                 if os.path.exists(temp_file):
-                    # Remove existing file at destination if it exists
                     if os.path.exists(filename):
                         os.remove(filename)
                     shutil.move(temp_file, filename)
@@ -772,7 +806,6 @@ class DynamicVisualizationTool(BaseTool):
                 return f"Successfully generated and saved visualization to '{filename}'."
             else:
                 return f"Error: Code executed but did not produce a plot file. Details: {execution_result}"
-
         except Exception as e:
             return f"An error occurred in the tool's main logic: {e}"
 
@@ -911,3 +944,98 @@ class DataToCsvTool(BaseTool):
         raise NotImplementedError("This tool does not support async yet.")
 
 # TODO: Implementing a dedicated report synthesis tool that can combine paper summary, table data, and references to files/visualizations for comprehensive reporting.
+
+class ArchitectureDiagramInput(BaseModel):
+    diagram_code: str = Field(description="A Mermaid or Graphviz DOT string describing the architecture.")
+    filename: str = Field(description="The filename to save the diagram to (e.g., 'transformer_architecture.png').")
+    engine: str = Field(default="mermaid", description="Diagram engine: 'mermaid' or 'graphviz'.")
+
+class ArchitectureDiagramTool(BaseTool):
+    name: str = "architecture_diagram_tool"
+    description: str = (
+        "Generate a model architecture diagram from Mermaid or Graphviz code and save it as a PNG in the artifacts directory. "
+        "Input: diagram_code (Mermaid or DOT), filename, engine ('mermaid' or 'graphviz')."
+    )
+    args_schema: Type[ArchitectureDiagramInput] = ArchitectureDiagramInput
+
+    def _run(self, diagram_code: str, filename: str, engine: str = "auto") -> str:
+        import os, logging, subprocess, tempfile
+        try:
+            if not filename.startswith("artifacts/"):
+                filename = f"artifacts/{filename}"
+            os.makedirs("artifacts", exist_ok=True)
+            # --- Auto-detect diagram type ---
+            is_dot = diagram_code.strip().lower().startswith("digraph") or "->" in diagram_code or "graph" in diagram_code.lower()
+            is_mermaid = any(keyword in diagram_code.lower() for keyword in ["graph lr", "graph td", "sequenceDiagram", "classDiagram", "stateDiagram", "erDiagram"])
+            tried_mermaid = tried_graphviz = False
+            # Try Graphviz first if DOT, else Mermaid
+            if engine == "graphviz" or (engine == "auto" and is_dot and not is_mermaid):
+                tried_graphviz = True
+                try:
+                    import graphviz
+                    dot = graphviz.Source(diagram_code)
+                    dot.format = "png"
+                    dot.render(filename=filename, cleanup=True)
+                    return f"Graphviz diagram saved to {filename}.png"
+                except Exception as e:
+                    logging.error(f"Graphviz error: {e}")
+                    # Try Mermaid as fallback
+                    tried_mermaid = True
+            if engine == "mermaid" or (engine == "auto" and (is_mermaid or not tried_graphviz)):
+                tried_mermaid = True
+                try:
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.mmd', delete=False) as tmpfile:
+                        tmpfile.write(diagram_code)
+                        tmpfile_path = tmpfile.name
+                    # --- Add Puppeteer config for --no-sandbox ---
+                    puppeteer_config_path = os.path.join(os.path.dirname(__file__), 'puppeteer-config.json')
+                    if not os.path.exists(puppeteer_config_path):
+                        with open(puppeteer_config_path, 'w') as f:
+                            f.write('{\n  "args": ["--no-sandbox", "--disable-setuid-sandbox"]\n}')
+                    cmd = [
+                        "mmdc", "-i", tmpfile_path, "-o", filename,
+                        "--puppeteerConfigFile", puppeteer_config_path
+                    ]
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    os.remove(tmpfile_path)
+                    if result.returncode != 0:
+                        logging.error(f"mmdc error: {result.stderr}")
+                        raise Exception(result.stderr)
+                    return f"Mermaid diagram saved to {filename}"
+                except FileNotFoundError:
+                    return "Error: Mermaid CLI (mmdc) is not installed. Please install it with 'npm install -g @mermaid-js/mermaid-cli'."
+                except Exception as e:
+                    logging.error(f"Mermaid error: {e}")
+                    # If Graphviz not tried yet, try it now
+                    if not tried_graphviz:
+                        try:
+                            import graphviz
+                            dot = graphviz.Source(diagram_code)
+                            dot.format = "png"
+                            dot.render(filename=filename, cleanup=True)
+                            return f"Mermaid failed: {e}\nGraphviz fallback succeeded. Diagram saved to {filename}.png"
+                        except Exception as e2:
+                            # Both failed, save as Markdown
+                            md_fallback = filename.rsplit('.', 1)[0] + "_diagram.md"
+                            with open(md_fallback, 'w') as f:
+                                f.write(f"# Diagram Code (Fallback)\n\n```")
+                                f.write(diagram_code)
+                                f.write("\n```")
+                            return f"Both Mermaid and Graphviz failed. Diagram code saved as Markdown to {md_fallback}. Mermaid error: {e} Graphviz error: {e2}"
+                    else:
+                        md_fallback = filename.rsplit('.', 1)[0] + "_diagram.md"
+                        with open(md_fallback, 'w') as f:
+                            f.write(f"# Diagram Code (Fallback)\n\n```")
+                            f.write(diagram_code)
+                            f.write("\n```")
+                        return f"Both Mermaid and Graphviz failed. Diagram code saved as Markdown to {md_fallback}. Mermaid error: {e}"
+            # If neither worked, fallback
+            md_fallback = filename.rsplit('.', 1)[0] + "_diagram.md"
+            with open(md_fallback, 'w') as f:
+                f.write(f"# Diagram Code (Fallback)\n\n```")
+                f.write(diagram_code)
+                f.write("\n```")
+            return f"Could not render diagram. Code saved as Markdown to {md_fallback}."
+        except Exception as e:
+            logging.exception("ArchitectureDiagramTool failed.")
+            return f"ArchitectureDiagramTool error: {e}"

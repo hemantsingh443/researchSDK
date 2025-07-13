@@ -73,6 +73,14 @@ This document provides an overview of the core agents and tools in the scientifi
 - **Purpose:** Exports structured table data (in JSON format) to a CSV file for further analysis or sharing.
 - **Usage:** Used after table extraction to save results in a format compatible with spreadsheets and data analysis tools.
 
+### 13. **architecture_diagram_tool**
+- **Purpose:** Generates architecture diagrams from Mermaid or Graphviz DOT code, saving them as PNG images. Automatically detects diagram type, tries the best rendering engine (Mermaid CLI or Graphviz), and falls back to Markdown if both fail. Handles Docker and root environments robustly.
+- **Usage:** Visualizes model or system architectures, workflows, or relationships. Ensures a usable artifact is always produced, even if rendering fails.
+
+### 14. **smart_plot_generation_tool**
+- **Purpose:** Analyzes structured JSON data and an analysis goal to automatically select and generate the most insightful plot. Handles multi-metric and multi-model comparisons, and produces professional-quality charts.
+- **Usage:** Use when you want the system to decide the best visualization for your data and analysis goal, rather than specifying a chart type directly.
+
 ---
 
 ## How Agents and Tools Interact
