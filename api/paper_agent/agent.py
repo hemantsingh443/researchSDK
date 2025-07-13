@@ -183,7 +183,7 @@ class PaperAgent:
         chroma_db_path = os.getenv("CHROMA_DB_PATH", "./paper_db")
         self.kb = KnowledgeBase(db_path=chroma_db_path, neo4j_uri=neo4j_uri, neo4j_user=neo4j_user, neo4j_password=neo4j_password)
         if llm_provider == "google":
-            extractor_model = "gemini-2.0-flash-lite"
+            extractor_model = "gemini-1.5-flash"
             extractor_api_type = "google"
         else:
             extractor_model = "llama3:8b-instruct-q4_K_M"

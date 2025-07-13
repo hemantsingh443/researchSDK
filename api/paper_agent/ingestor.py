@@ -3,6 +3,8 @@ import arxiv
 from .structures import Paper, Author
 from .extractor import Extractor
 from typing import Optional, Dict, Any
+import shutil
+import os
 
 class Ingestor:
     def __init__(self):
@@ -61,7 +63,20 @@ class Ingestor:
                 pdf_path = result.download_pdf()
                 print(f"Downloaded to: {pdf_path}")
                 
-           
+                # Copy the PDF to artifacts directory for API access
+                artifacts_dir = "artifacts"
+                if not os.path.exists(artifacts_dir):
+                    os.makedirs(artifacts_dir)
+                if pdf_path and os.path.exists(pdf_path):
+                    dest_path = os.path.join(artifacts_dir, os.path.basename(pdf_path))
+                    try:
+                        shutil.copy(pdf_path, dest_path)
+                        print(f"Copied PDF to artifacts: {dest_path}")
+                    except Exception as copy_exc:
+                        print(f"!! Failed to copy PDF to artifacts: {copy_exc}")
+                else:
+                    print(f"!! PDF file not found after download: {pdf_path}")
+                
                 arxiv_metadata = {
                     "paper_id": result.entry_id,
                     "title": result.title,

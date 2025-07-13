@@ -10,6 +10,7 @@ import json
 import numpy as np
 import os
 from langchain_core.language_models.chat_models import BaseChatModel 
+import shutil
 
 from .knowledge_base import KnowledgeBase
 from .ingestor import Ingestor
@@ -439,6 +440,9 @@ class PlotGenerationTool(BaseTool):
 
     def _run(self, json_data: str, chart_type: str, title: str, filename: str) -> str:
         try:
+            # Ensure filename is in artifacts directory
+            if not filename.startswith("artifacts/"):
+                filename = f"artifacts/{filename}"
             # Parse the structured JSON input
             data = json.loads(json_data)
             df = pd.DataFrame(data['data'], columns=data['columns'])
@@ -476,6 +480,9 @@ class SmartPlotGenerationTool(BaseTool):
 
     def _run(self, json_data: str, title: str, filename: str, analysis_goal: str) -> str:
         try:
+            # Ensure filename is in artifacts directory
+            if not filename.startswith("artifacts/"):
+                filename = f"artifacts/{filename}"
             data = json.loads(json_data)
             df = pd.DataFrame(data['data'], columns=data['columns'])
             df.set_index(df.columns[0], inplace=True)
@@ -669,6 +676,9 @@ class DynamicVisualizationTool(BaseTool):
 
     def _run(self, json_data: str, analysis_goal: str, filename: str, chart_type: str = "") -> str:
         try:
+            # Ensure filename is in artifacts directory, but avoid double prefix
+            if not filename.startswith("artifacts/"):
+                filename = f"artifacts/{filename}"
             data = json.loads(json_data)
             df = pd.DataFrame(data['data'], columns=data['columns'])
             for col in df.columns:
@@ -700,12 +710,21 @@ class DynamicVisualizationTool(BaseTool):
                 execution_result = "SyntaxError encountered. See above for details."
             print(f"--- Execution Result ---\n{execution_result}\n------------------------")
             
-            temp_filename = 'plot.png'
-            if os.path.exists(temp_filename):
-                os.rename(temp_filename, filename)
+            # Robust artifact move/copy logic
+            temp_filenames = ['plot.png', filename.split('/')[-1]]
+            moved = False
+            for temp_file in temp_filenames:
+                if os.path.exists(temp_file):
+                    # Remove existing file at destination if it exists
+                    if os.path.exists(filename):
+                        os.remove(filename)
+                    shutil.move(temp_file, filename)
+                    moved = True
+                    break
+            if moved:
                 return f"Successfully generated and saved visualization to '{filename}'."
             else:
-                return f"Error: Code executed but did not produce '{temp_filename}'. Details: {execution_result}"
+                return f"Error: Code executed but did not produce a plot file. Details: {execution_result}"
 
         except Exception as e:
             return f"An error occurred in the tool's main logic: {e}"

@@ -15,7 +15,7 @@ tiktoken
 langchain_community
 tqdm 
 PyMuPDF 
-duckduckgo-search
+duckduckgo-search 
 
 # Web Server
 fastapi
