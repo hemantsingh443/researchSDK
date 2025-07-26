@@ -14,7 +14,6 @@ class Paper(BaseModel):
     abstract: Optional[str] = None
     full_text: str
     
-    #  will populate these in later phases
     sections: Dict[str, str] = Field(default_factory=dict, description="Text broken down by section (e.g., Introduction)")
     tables: List[str] = Field(default_factory=list)
     figures: List[str] = Field(default_factory=list)

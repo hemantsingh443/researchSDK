@@ -1,34 +1,63 @@
 import fitz
 import arxiv
 from .structures import Paper, Author
-from .extractor import Extractor
 from typing import Optional, Dict, Any
 import shutil
 import os
 
+from .extractor import Extractor 
+
+from .grobid_client import GrobidClient
+from .paper_parser import parse_grobid_tei, to_markdown
+
 class Ingestor:
     def __init__(self):
+        """Initializes the Ingestor with the Grobid client and a fallback LLM Extractor."""
         self.extractor = Extractor(api_type="local")
-        print("Ingestor initialized with a LOCAL AI Extractor.")
+        self.grobid_client = GrobidClient()
+        print("Ingestor initialized with a Grobid-powered parsing pipeline.")
+
+    def _parse_pdf_to_structured_text(self, file_path: str) -> str:
+        """
+        The core parsing pipeline: PDF -> Grobid XML -> Markdown.
+        Returns the final Markdown text. Falls back to basic extraction on failure.
+        """
+        xml_content = self.grobid_client.process_pdf(file_path)
+        if not xml_content:
+            print(f"Grobid processing failed for '{file_path}'. Falling back to basic text extraction.")
+            try:
+                doc = fitz.open(file_path)
+                full_text = "\n".join(page.get_text() for page in doc)
+                doc.close()
+                return full_text
+            except Exception as e:
+                print(f"Fallback basic extraction failed: {e}")
+                return "" 
+        temp_xml_path = file_path + ".tei.xml"
+        try:
+            with open(temp_xml_path, 'w', encoding='utf-8') as f:
+                f.write(xml_content)
+            
+            parsed_data = parse_grobid_tei(temp_xml_path)
+
+            full_markdown_text = to_markdown(parsed_data) 
+            return full_markdown_text
+        
+        except Exception as e:
+            print(f"Failed to parse Grobid XML or convert to Markdown: {e}")
+            return "" 
+            
+        finally:
+            if os.path.exists(temp_xml_path):
+                os.remove(temp_xml_path)
 
     def load_from_pdf(self, file_path: str, source_metadata: Optional[Dict[str, Any]] = None) -> Paper:
         """
-        Loads a paper from a local PDF file and extracts metadata.
-        Prioritizes provided source_metadata over LLM extraction.
+        Loads a paper from a local PDF file, using Grobid for primary extraction.
         """
-        try:
-            doc = fitz.open(file_path)
-        except Exception as e:
-            print(f"Error opening or reading PDF: {e}")
-            raise
+        structured_full_text = self._parse_pdf_to_structured_text(file_path)
 
-        full_text = ""
-        for page_num in range(len(doc)):
-            page = doc.load_page(page_num)
-            full_text += page.get_text() + "\n"  # type: ignore[attr-defined]
-        doc.close()
-
-        paper_obj = Paper(paper_id=file_path, full_text=full_text)
+        paper_obj = Paper(paper_id=file_path, full_text=structured_full_text)
 
         if source_metadata:
             print("Using pre-fetched metadata from API.")
@@ -37,16 +66,16 @@ class Ingestor:
             paper_obj.authors = source_metadata.get("authors", [])
             paper_obj.paper_id = source_metadata.get("paper_id", file_path)
         else:
-            print("No source metadata provided. Falling back to LLM extraction.")
+            print("No source metadata. Using LLM Extractor on Grobid-parsed Markdown for validation.")
             paper_obj = self.extractor.extract_metadata(paper_obj)
 
-        # --- NEW: Extract citations from the full text ---
-        paper_obj.citations = self.extractor.extract_citations(full_text)
+        paper_obj.citations = self.extractor.extract_citations(structured_full_text)
         return paper_obj
 
     def load_from_arxiv(self, query: str, max_results: int = 3) -> list[Paper]:
         """
-        Searches arXiv, downloads PDFs, and processes them using API metadata.
+        Searches arXiv, downloads PDFs, and processes them using the Grobid pipeline.
+        This method does not need to change.
         """
         print(f"Searching arXiv for '{query}'...")
         search = arxiv.Search(query=query, max_results=max_results, sort_by=arxiv.SortCriterion.Relevance)
@@ -63,7 +92,6 @@ class Ingestor:
                 pdf_path = result.download_pdf()
                 print(f"Downloaded to: {pdf_path}")
                 
-                # Copy the PDF to artifacts directory for API access
                 artifacts_dir = "artifacts"
                 if not os.path.exists(artifacts_dir):
                     os.makedirs(artifacts_dir)
@@ -74,8 +102,6 @@ class Ingestor:
                         print(f"Copied PDF to artifacts: {dest_path}")
                     except Exception as copy_exc:
                         print(f"!! Failed to copy PDF to artifacts: {copy_exc}")
-                else:
-                    print(f"!! PDF file not found after download: {pdf_path}")
                 
                 arxiv_metadata = {
                     "paper_id": result.entry_id,

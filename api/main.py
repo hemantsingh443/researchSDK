@@ -16,7 +16,7 @@ app = FastAPI(
 
 print("--- Initializing Master Agent for API ---")
 worker_agent = WorkerAgent(llm_provider="google")
-master_llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash-lite", temperature=0.0) 
+master_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.0) 
 master_agent = MasterAgent(worker_agent=worker_agent, llm=master_llm, max_loops=20)
 print("--- Master Agent is Online and Ready ---")
 
@@ -36,7 +36,6 @@ async def execute_query(request: QueryRequest):
     """
     try:
         print(f"Received query: {request.query}")
-        # Modified: get both the final report and the thought process
         final_report, thought_process = master_agent.run_with_thoughts(request.query)
         generated_artifacts = [f for f in os.listdir('./artifacts') if os.path.isfile(os.path.join('./artifacts', f))]
         return {"report": final_report, "artifacts": generated_artifacts, "thought_process": thought_process}

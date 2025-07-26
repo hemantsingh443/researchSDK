@@ -1,4 +1,4 @@
-from .agent import PaperAgent as WorkerAgent # Our ReAct agent is now the worker
+from .agent import PaperAgent as WorkerAgent 
 from langchain_core.language_models.chat_models import BaseChatModel
 from typing import Dict, Any
 import json
@@ -31,7 +31,6 @@ class MasterAgent:
         It handles markdown code blocks, extra text, and other common LLM artifacts.
         """
         import re
-        # Remove markdown code block wrappers (```json ... ```)
         if json_string.startswith("```json"):
             json_string = json_string[7:]
             if json_string.endswith("```"):
@@ -41,7 +40,6 @@ class MasterAgent:
             if json_string.endswith("```"):
                 json_string = json_string[:-3]
         json_string = json_string.strip()
-        # Use regex to extract the first JSON object
         match = re.search(r'\{.*\}', json_string, re.DOTALL)
         if match:
             json_str = match.group(0)
@@ -59,7 +57,6 @@ class MasterAgent:
 You are a world-class AI project planner. Your job is to break down the following user request into the SHORTEST, most EFFICIENT sequence of tool-based steps, using the available tools:
 ---\n{self.tool_manifest}\n---\nUser Request: '{user_query}'\n---\nRules:\n1. Each step must use a specific tool and specify its required arguments.\n2. Chain steps so outputs from one can be used as inputs for the next.\n3. Be explicit and efficient.\n4. Output ONLY a numbered list of steps, no extra text.\n"""
         plan_response = self.llm.invoke(plan_prompt).content
-        # Ensure plan_response is always a list for robust iteration
         if not isinstance(plan_response, list):
             plan_response = [plan_response]
         plan_lines = []
@@ -76,7 +73,6 @@ You are a world-class AI project planner. Your job is to break down the followin
         print("--- Generated Plan ---")
         for i, step in enumerate(plan):
             print(f"{i+1}. {step}")
-        # --- END PLAN GENERATION ---
         for i in range(self.max_loops):
             print(f"\n{'='*20} MASTER AGENT LOOP {i+1}/{self.max_loops} {'='*20}")
             master_prompt = self._create_master_prompt(state)
@@ -134,7 +130,6 @@ You are a world-class AI project planner. Your job is to break down the followin
                     "action_taken": action_json,
                     "observation": worker_response
                 })
-                # --- CONTEXT PASSING LOGIC ---
                 try:
                     if action_name == "table_extraction_tool":
                         import json
@@ -149,10 +144,8 @@ You are a world-class AI project planner. Your job is to break down the followin
                         if paper_id:
                             state[f"summary_{paper_id}"] = worker_response
                             print(f"[Context Passing] Stored summary for {paper_id}")
-                    # Add similar logic for other tools as needed
                 except Exception as e:
                     print(f"[Context Passing Error]: {e}")
-                # --- END CONTEXT PASSING LOGIC ---
             else:
                 print("Invalid or missing action name. Skipping this step.")
                 break
@@ -189,12 +182,10 @@ You are a world-class AI project planner. Your job is to break down the followin
             "original_request": user_query,
             "completed_steps": []
         }
-        # --- NEW: Generate a step-by-step plan using the LLM ---
         plan_prompt = f"""
 You are a world-class AI project planner. Your job is to break down the following user request into the SHORTEST, most EFFICIENT sequence of tool-based steps, using the available tools:
 ---\n{self.tool_manifest}\n---\nUser Request: '{user_query}'\n---\nRules:\n1. Each step must use a specific tool and specify its required arguments.\n2. Chain steps so outputs from one can be used as inputs for the next.\n3. Be explicit and efficient.\n4. Output ONLY a numbered list of steps, no extra text.\n"""
         plan_response = self.llm.invoke(plan_prompt).content
-        # Ensure plan_response is always a list for robust iteration
         if not isinstance(plan_response, list):
             plan_response = [plan_response]
         plan_lines = []
@@ -211,7 +202,6 @@ You are a world-class AI project planner. Your job is to break down the followin
         print("--- Generated Plan ---")
         for i, step in enumerate(plan):
             print(f"{i+1}. {step}")
-        # --- END PLAN GENERATION ---
         for i in range(self.max_loops):
             print(f"\n{'='*20} MASTER AGENT LOOP {i+1}/{self.max_loops} {'='*20}")
             master_prompt = self._create_master_prompt(state)
@@ -269,7 +259,6 @@ You are a world-class AI project planner. Your job is to break down the followin
                     "action_taken": action_json,
                     "observation": worker_response
                 })
-                # --- CONTEXT PASSING LOGIC ---
                 try:
                     if action_name == "table_extraction_tool":
                         import json
@@ -284,10 +273,8 @@ You are a world-class AI project planner. Your job is to break down the followin
                         if paper_id:
                             state[f"summary_{paper_id}"] = worker_response
                             print(f"[Context Passing] Stored summary for {paper_id}")
-                    # Add similar logic for other tools as needed
                 except Exception as e:
                     print(f"[Context Passing Error]: {e}")
-                # --- END CONTEXT PASSING LOGIC ---
             else:
                 print("Invalid or missing action name. Skipping this step.")
                 break

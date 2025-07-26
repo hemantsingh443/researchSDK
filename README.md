@@ -24,10 +24,7 @@ A scientific research assistant system that leverages LLMs, LangChain, Neo4j, an
 2. **Set up Neo4j and vector DB as described in the docs.**
 3. **Ingest papers** (see documentation for ingestion tools or API endpoints).
 4. **Run the API server:**
-   ```bash
-   uvicorn api.main:app --reload
-   ```
-   Or use Docker Compose:
+    use Docker Compose:
    ```bash
    docker-compose up
    ```

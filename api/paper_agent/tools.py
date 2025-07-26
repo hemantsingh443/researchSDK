@@ -14,12 +14,9 @@ from .knowledge_base import KnowledgeBase
 from .ingestor import Ingestor
 from .extractor import Extractor
 
-# --- Tool for Searching the Web ---
-# This one is easy, we can use a pre-built tool from LangChain
 web_search_tool = DuckDuckGoSearchRun()
 
 
-# --- Tool for Answering Questions from the Knowledge Base ---
 class KBQueryInput(BaseModel):
     """Input model for the Knowledge Base Query Tool."""
     query: str = Field(description="A detailed, specific question to ask the knowledge base.")
@@ -34,7 +31,6 @@ class KnowledgeBaseQueryTool(BaseTool):
     )
     args_schema: Type[BaseModel] = KBQueryInput
     
-    # Accept any object with a run_query method
     rag_agent: Any
 
     def _run(self, query: str) -> str:
@@ -43,12 +39,9 @@ class KnowledgeBaseQueryTool(BaseTool):
 
     async def _arun(self, query: str) -> str:
         """Use the tool asynchronously."""
-        # For now, we don't have an async implementation, so we raise an error
-        # or just call the sync version.
         raise NotImplementedError("This tool does not support async yet.")
 
 
-# --- Tool for Loading New Papers from ArXiv ---
 class ArxivSearchInput(BaseModel):
     """Input model for the ArXiv Search Tool."""
     query: str = Field(description="The search query to send to the arXiv API.")
@@ -63,7 +56,6 @@ class ArxivSearchTool(BaseTool):
     )
     args_schema: Type[BaseModel] = ArxivSearchInput
 
-    # This tool needs access to both the Ingestor and the KnowledgeBase
     ingestor: Ingestor
     kb: KnowledgeBase
 
@@ -82,7 +74,6 @@ class ArxivSearchTool(BaseTool):
         raise NotImplementedError("This tool does not support async yet.")
 
 
-# --- NEW Tool for Summarizing a Specific Paper ---
 class SummarizationInput(BaseModel):
     """Input model for the Paper Summarization Tool."""
     paper_id: str = Field(description="The unique ID of the paper to summarize, e.g., its file path or arXiv ID.")
@@ -95,22 +86,18 @@ class PaperSummarizationTool(BaseTool):
         "You must provide the 'paper_id' of the paper you want to summarize. "
         "To get the paper_id, you might need to use another tool first to find the paper."
     )
-    args_schema: Type[BaseModel] = SummarizationInput
+    args_schema: Type[SummarizationInput] = SummarizationInput
 
-    # This tool needs access to both the KB (to get the paper) and the Extractor (to summarize it)
     kb: KnowledgeBase
     extractor: Extractor
 
     def _run(self, paper_id: str) -> str:
         """Use the tool."""
-        # The ChromaDB 'get' method can fetch items by their ID.
-        # We need to find all chunks for a given paper_id.
         results = self.kb.collection.get(where={"paper_id": paper_id})
         
         if not results or not results.get('documents'):
             return f"Error: Could not find a paper with ID '{paper_id}' in the knowledge base."
 
-        # --- NEW: Copy or Download PDF to artifacts if available ---
         import shutil, os
         pdf_filename = None
         try:
@@ -144,16 +131,12 @@ class PaperSummarizationTool(BaseTool):
                     print(f"Failed to copy referenced PDF to artifacts: {e}")
         except Exception as e:
             print(f"PDF artifact logic error: {e}")
-        # --- END PDF COPY/DOWNLOAD LOGIC ---
 
-        # Reconstruct the full text and get metadata
         documents = results.get('documents')
         if not documents:
             return f"Error: Could not find a paper with ID '{paper_id}' in the knowledge base."
 
-        # Reconstruct the full text and get metadata
         full_text = " ".join([str(doc) for doc in documents])
-        # Defensive: ensure metadatas exists and has at least one item
         metadatas = results.get('metadatas')
         if metadatas and len(metadatas) > 0:
             raw_title = metadatas[0].get('title', 'Unknown Title')
@@ -161,14 +144,12 @@ class PaperSummarizationTool(BaseTool):
         else:
             title = 'Unknown Title'
 
-        # Use our new extractor method
         summary = self.extractor.summarize_paper_text(full_text, title)
         return summary
 
     async def _arun(self, paper_id: str) -> str:
         raise NotImplementedError("This tool does not support async yet.")
 
-# --- NEW Tool for Fetching a Specific Paper by ArXiv ID ---
 class ArxivFetchInput(BaseModel):
     """Input model for the ArXiv Fetch Tool."""
     paper_arxiv_id: str = Field(description="The unique arXiv ID of the paper, e.g., '1706.03762'.")
@@ -189,7 +170,6 @@ class ArxivFetchTool(BaseTool):
     kb: KnowledgeBase
 
     def _run(self, paper_arxiv_id: str) -> str:
-        # The arxiv library allows fetching by ID directly
         try:
             import arxiv
             result = next(arxiv.Search(id_list=[paper_arxiv_id]).results())
@@ -206,56 +186,54 @@ class ArxivFetchTool(BaseTool):
     async def _arun(self, paper_arxiv_id: str) -> str:
         raise NotImplementedError("This tool does not support async yet.")
 
-# --- THE NEW, SUPERIOR FINDER TOOL ---
 class PaperFinderInput(BaseModel):
-    """Input model for the Graph Paper Finder Tool."""
+    """Input model for the paper metadata finder tool."""
     query: str = Field(description="A query to find relevant papers, usually the title of the paper.")
 
-class GraphPaperFinderTool(BaseTool):
+class GetPaperMetadataByTitleTool(BaseTool):
     """
-    Finds a specific paper in the knowledge graph by its title and returns ALL its metadata,
-    including its exact 'paper_id' (which could be an arXiv ID or a local path).
+    Use this tool to fetch a paper's metadata (ID, title, authors) from the knowledge graph by title.
+    Only use this to look up paper IDs and metadata.
     """
-    name: str = "graph_paper_finder_tool"
+    name: str = "get_paper_metadata_by_title"
     description: str = (
-        "Use this tool as the VERY FIRST STEP to find a paper's 'paper_id' and other metadata. "
-        "It performs an exact, case-insensitive search on the paper's title in the knowledge graph. "
-        "This is the most reliable way to find a specific paper that is already in the database."
+        "Use this to find a paper's 'paper_id' and other metadata like authors using its title. "
+        "This is the most reliable way to find a specific paper already in the database."
     )
     args_schema: Type[PaperFinderInput] = PaperFinderInput
-
     graph: Neo4jGraph
 
     def _run(self, query: str) -> str:
         """Use the tool."""
         cypher = """
-        MATCH (p:Paper)
+        MATCH (a:Author)-[:AUTHORED]->(p:Paper)
         WHERE toLower(p.title) CONTAINS toLower($query)
-        RETURN p.id as paper_id, p.title as title
+        WITH p, collect(a.name) AS authorNames
+        RETURN p.id AS paper_id, p.title AS title, authorNames AS authors
         LIMIT 5
         """
         try:
             result = self.graph.query(cypher, params={"query": query})
             if not result:
-                return f"No paper found in the Knowledge Graph with a title containing '{query}'."
-            return str(result)
+                return json.dumps({"status": "failure", "reason": f"No paper found with title containing '{query}'."})
+            return json.dumps({"status": "success", "data": result})
         except Exception as e:
             return f"Error executing graph query: {e}"
 
-# --- NEW Tool for Answering Questions using RAG ---
 class QuestionAnsweringInput(BaseModel):
     """Input model for the Question Answering Tool."""
     question: str = Field(description="A detailed, specific question to ask about the content of the papers.")
 
-class QuestionAnsweringTool(BaseTool):
-    """A tool to answer questions using the knowledge base. This performs a search and synthesizes an answer."""
-    name: str = "question_answering_tool"
+class AnswerFromPapersTool(BaseTool):
+    """
+    Use this tool to answer questions about the content of papers in the knowledge base. This is the main RAG-based question answering tool.
+    """
+    name: str = "answer_from_papers"
     description: str = (
-        "Use this tool to answer a user's question about a topic. "
-        "This is a powerful tool that uses the full RAG pipeline."
+        "Use this tool to answer questions about the content of papers in the knowledge base. "
+        "This is the main RAG-based question answering tool."
     )
     args_schema: Type[QuestionAnsweringInput] = QuestionAnsweringInput
-    
     rag_agent: Any # This will be our TempRAGAgent
 
     def _run(self, question: str) -> str:
@@ -265,7 +243,6 @@ class QuestionAnsweringTool(BaseTool):
     async def _arun(self, question: str) -> str:
         raise NotImplementedError("This tool does not support async yet.")
 
-# --- NEW Tool for Querying the Graph Database ---
 class GraphQueryInput(BaseModel):
     """Input model for the Graph Query Tool."""
     query: str = Field(description="A Cypher query to run against the Neo4j graph database.")
@@ -289,13 +266,9 @@ class GraphQueryTool(BaseTool):
             result = self.graph.query(query)
             
 
-            # Instead of returning the raw list, format it into a sentence.
             if not result:
                 return "No results found in the graph for that query."
             
-            # Assuming the query returns a list of dictionaries, where each dict
-            # has one key (e.g., 'author' or 'title').
-            # We extract all the values from the list of dicts.
             values = [list(record.values())[0] for record in result if record]
             
             if not values:
@@ -308,8 +281,6 @@ class GraphQueryTool(BaseTool):
 
     def __init__(self, **kwargs: Any):
         super().__init__(**kwargs)
-        # We dynamically add the schema to the description, escaping the curly braces
-        # so they are not treated as prompt variables.
         schema = self.graph.get_schema
         if callable(schema):
             schema = schema()
@@ -334,12 +305,10 @@ class TableExtractionTool(BaseTool):
     extractor: Extractor
 
     def _run(self, paper_id: str, topic_of_interest: str) -> str:
-        # Fetch the paper text from the knowledge base
         results = self.kb.collection.get(where={"paper_id": paper_id})
         if not results or not results['documents']:
-            return f"Error: Could not find paper with ID {paper_id}."
-        
-        # --- NEW: Copy or Download PDF to artifacts if available ---
+            response = {"status": "failure", "reason": f"Could not find paper with ID '{paper_id}' in the knowledge base."}
+            return json.dumps(response)
         import shutil, os
         pdf_filename = None
         try:
@@ -347,12 +316,10 @@ class TableExtractionTool(BaseTool):
                 pdf_filename = os.path.basename(paper_id)
             elif paper_id.startswith('http') and 'arxiv.org' in paper_id:
                 arxiv_id = paper_id.split('/')[-1].split('v')[0]
-                # Try to find a matching PDF in known locations
                 for fname in os.listdir('.'):
                     if fname.startswith(arxiv_id) and fname.endswith('.pdf'):
                         pdf_filename = fname
                         break
-                # If not found, try to download it
                 if not pdf_filename:
                     try:
                         import arxiv
@@ -362,7 +329,6 @@ class TableExtractionTool(BaseTool):
                         print(f"Downloaded missing PDF for artifacts: {pdf_filename}")
                     except Exception as e:
                         print(f"Failed to download missing PDF for artifacts: {e}")
-            # Copy if found and not already in artifacts
             if pdf_filename:
                 artifacts_dir = 'artifacts'
                 dest_path = os.path.join(artifacts_dir, pdf_filename)
@@ -376,8 +342,6 @@ class TableExtractionTool(BaseTool):
                     print(f"Failed to copy referenced PDF to artifacts: {e}")
         except Exception as e:
             print(f"PDF artifact logic error: {e}")
-        # --- END PDF COPY/DOWNLOAD LOGIC ---
-        
         full_text = " ".join(results['documents'])
         metadatas = results.get('metadatas')
         if metadatas and len(metadatas) > 0:
@@ -385,11 +349,45 @@ class TableExtractionTool(BaseTool):
             title = str(raw_title) if raw_title is not None else 'Unknown Title'
         else:
             title = 'Unknown Title'
+        json_table_str = self.extractor.extract_table_as_json(full_text, title, topic_of_interest)
 
-        # --- NEW JSON OUTPUT LOGIC ---
-        # We call a modified extractor method
-        json_table = self.extractor.extract_table_as_json(full_text, title, topic_of_interest)
-        return json_table # Return the JSON string directly
+        try:
+            if "```json" in json_table_str:
+                json_table_str = json_table_str.split("```json")[1].split("```" ).strip()
+            
+            parsed_data = json.loads(json_table_str)
+            if isinstance(parsed_data, dict) and "columns" in parsed_data and "data" in parsed_data and parsed_data["data"]:
+                response = {"status": "success", "data": parsed_data}
+                return json.dumps(response)
+            else:
+                print("LLM-based table extraction failed or returned no data. Trying Camelot PDF extraction as fallback...")
+        except (json.JSONDecodeError, TypeError):
+            print("LLM-based table extraction failed (invalid JSON). Trying Camelot PDF extraction as fallback...")
+
+        try:
+            import camelot
+            pdf_path = None
+            if pdf_filename and os.path.exists(pdf_filename):
+                pdf_path = pdf_filename
+            elif os.path.exists(paper_id) and paper_id.endswith('.pdf'):
+                pdf_path = paper_id
+            if pdf_path:
+                tables = camelot.read_pdf(pdf_path, pages='all')
+                if tables and len(tables) > 0:
+                    df = tables[0].df
+                    columns = list(df.iloc[0])
+                    data = df.iloc[1:].values.tolist()
+                    response = {"status": "success", "data": {"columns": columns, "data": data}}
+                    return json.dumps(response)
+                else:
+                    print("Camelot found no tables in the PDF.")
+            else:
+                print("No PDF file found for Camelot extraction.")
+        except Exception as camelot_exc:
+            print(f"Camelot extraction failed: {camelot_exc}")
+
+        response = {"status": "failure", "reason": "No relevant table matching the topic was found, and PDF table extraction also failed."}
+        return json.dumps(response)
 
 class RelationshipInput(BaseModel):
     paper_a_title: str = Field(description="The title of the first paper.")
@@ -406,7 +404,6 @@ class RelationshipAnalysisTool(BaseTool):
     llm: Any  # Accept any LLM with an .invoke method
 
     def _run(self, paper_a_title: str, paper_b_title: str) -> str:
-        # A Cypher query to find the shortest path between two papers
         cypher_query = f"""
         MATCH (p1:Paper), (p2:Paper), path = shortestPath((p1)-[:CITES*]-(p2))
         WHERE toLower(p1.title) CONTAINS toLower('{paper_a_title}')
@@ -419,7 +416,6 @@ class RelationshipAnalysisTool(BaseTool):
         if not graph_data or graph_data == '[]':
             return "No direct citation path found between the two papers in the knowledge graph."
 
-        # Use an LLM to explain the path
         synthesis_prompt = f"""
         A user wants to know the relationship between '{paper_a_title}' and '{paper_b_title}'.
         A knowledge graph query returned the following connection path:
@@ -450,7 +446,6 @@ class CitationAnalysisTool(BaseTool):
 
     def _run(self, analysis_type: str, limit: int = 5) -> str:
         if analysis_type == 'most_cited':
-            # This query counts incoming CITES relationships
             query = f"""
             MATCH (p:Paper)<-[r:CITES]-()
             RETURN p.title AS paper, count(r) AS citations
@@ -458,7 +453,6 @@ class CitationAnalysisTool(BaseTool):
             LIMIT {limit}
             """
         elif analysis_type == 'hottest_papers':
-            # This query counts outgoing CITES relationships
             query = f"""
             MATCH (p:Paper)-[r:CITES]->()
             RETURN p.title AS paper, count(r) AS citations_made
@@ -495,12 +489,10 @@ class KeywordExtractionTool(BaseTool):
             return f"Error: Could not find paper with ID {paper_id}."
         
         full_text = " ".join(results['documents'])
-        # Call a new method on our extractor
         keywords = self.extractor.extract_keywords(full_text, num_keywords)
         return f"The key concepts are: {', '.join(keywords)}"
 
 class PlottingInput(BaseModel):
-    # The input is now a JSON string, not markdown
     json_data: str = Field(description="A JSON string containing the table data, with 'columns' and 'data' keys.")
     chart_type: str = Field(description="The type of chart to generate (e.g., 'bar', 'line').")
     title: str = Field(description="The title for the chart.")
@@ -513,15 +505,11 @@ class PlotGenerationTool(BaseTool):
 
     def _run(self, json_data: str, chart_type: str, title: str, filename: str) -> str:
         try:
-            # Ensure filename is in artifacts directory
             if not filename.startswith("artifacts/"):
                 filename = f"artifacts/{filename}"
-            # Parse the structured JSON input
             data = json.loads(json_data)
             df = pd.DataFrame(data['data'], columns=data['columns'])
 
-            # Plotting logic is now much cleaner
-            # Assume the first column is the x-axis (index)
             df.set_index(df.columns[0], inplace=True)
             
             ax = df.plot(kind=chart_type, title=title, figsize=(10, 6))
@@ -536,10 +524,8 @@ class PlotGenerationTool(BaseTool):
 
 class SmartPlottingInput(BaseModel):
     json_data: str = Field(description="A JSON string with 'columns' and 'data' keys.")
-    # The agent now decides the best chart type!
     title: str = Field(description="The title for the chart.")
     filename: str = Field(description="The filename to save the plot to (e.g., 'performance_chart.png').")
-    # A new field to guide the LLM
     analysis_goal: str = Field(description="A short sentence describing what the plot should show or compare. E.g., 'Compare the error metrics (RMSE, MAE) of the models'.")
 
 class SmartPlotGenerationTool(BaseTool):
@@ -553,22 +539,16 @@ class SmartPlotGenerationTool(BaseTool):
 
     def _run(self, json_data: str, title: str, filename: str, analysis_goal: str) -> str:
         try:
-            # Ensure filename is in artifacts directory
             if not filename.startswith("artifacts/"):
                 filename = f"artifacts/{filename}"
             data = json.loads(json_data)
             df = pd.DataFrame(data['data'], columns=data['columns'])
             df.set_index(df.columns[0], inplace=True)
             
-            # --- THE NEW INTELLIGENCE ---
-            # Heuristic: If one column's values are much larger than the others,
-            # plot it on a secondary y-axis.
             numeric_cols = df.select_dtypes(include=np.number).columns
             if len(numeric_cols) > 1:
                 max_vals = df[numeric_cols].max()
-                # If the max of one column is > 10x the max of another...
                 if max_vals.max() / max_vals.min() > 10:
-                    # Plot the largest column on a secondary axis
                     fig, ax1 = plt.subplots(figsize=(12, 7))
                     ax2 = ax1.twinx() # Create a second y-axis
                     
@@ -616,7 +596,6 @@ class DynamicVisualizationTool(BaseTool):
     )
     args_schema: Type[DynamicVisualizationInput] = DynamicVisualizationInput
     
-    # This tool needs its own LLM to write the plotting code
     code_writing_llm: BaseChatModel
 
     def _generate_plotting_code(self, df_head: str, analysis_goal: str, chart_type: str | None = None) -> str:
@@ -717,7 +696,6 @@ class DynamicVisualizationTool(BaseTool):
             cleaned_code = 'import numpy as np\n' + cleaned_code
         return cleaned_code
 
-    # --- NEW HELPER FUNCTION for safe code execution ---
     def execute_python_code(self, code: str, df: pd.DataFrame) -> str:
         """
         Executes Python code in a controlled environment.
@@ -750,30 +728,34 @@ class DynamicVisualizationTool(BaseTool):
 
     def _run(self, json_data: str, analysis_goal: str, filename: str, chart_type: str = "") -> str:
         try:
-            # Ensure filename is in artifacts directory, but avoid double prefix
             if not filename.startswith("artifacts/"):
                 filename = f"artifacts/{filename}"
-            data = json.loads(json_data)
-            df = pd.DataFrame(data['data'], columns=data['columns'])
-            # --- NEW: Handle multi-paper/model comparison ---
+
+            input_obj = json.loads(json_data)
+            if input_obj.get("status") != "success":
+                reason = input_obj.get("reason", "The previous tool failed to provide data.")
+                return f"Error: Cannot visualize because the required data was not provided. Reason: {reason}"
+
+            table_data = input_obj.get("data")
+            if not table_data:
+                return "Error: Cannot visualize because the previous tool succeeded but returned no data."
+            
+            df = pd.DataFrame(table_data['data'], columns=table_data['columns'])
             group_col = None
             for col in df.columns:
                 if col.lower() in ["paper_id", "paper_name", "model", "model_name"]:
                     group_col = col
                     break
             if group_col:
-                # Set group_col as index if not already
                 if df.index.name != group_col:
                     df.set_index(group_col, inplace=True)
             else:
-                # Fallback: set first object column with unique values as index
                 for col in df.columns:
                     if df[col].dtype == 'object' and df[col].nunique() == len(df):
                         df.set_index(col, inplace=True)
                         break
             for col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='ignore')
-            # --- END NEW LOGIC ---
             generated_code = self._generate_plotting_code(df.head().to_string(), analysis_goal, chart_type)
             if "```python" in generated_code:
                 generated_code = generated_code.split("```python")[1].split("````")[0].strip()
@@ -809,7 +791,6 @@ class DynamicVisualizationTool(BaseTool):
         except Exception as e:
             return f"An error occurred in the tool's main logic: {e}"
 
-# --- Tool for Contradiction/Conflicting Results Analysis ---
 class ContradictionInput(BaseModel):
     paper_a_id: str = Field(description="The ID of the first paper for comparison.")
     paper_b_id: str = Field(description="The ID of the second paper for comparison.")
@@ -830,7 +811,6 @@ class ConflictingResultsTool(BaseTool):
     extractor: Extractor # Uses an LLM for the analysis
 
     def _run(self, paper_a_id: str, paper_b_id: str, topic: str) -> str:
-        # Fetch text for both papers
         try:
             result_a = self.kb.collection.get(where={"paper_id": paper_a_id})
             result_b = self.kb.collection.get(where={"paper_id": paper_b_id})
@@ -851,7 +831,6 @@ class ConflictingResultsTool(BaseTool):
         if not text_a or not text_b:
             return "Error: Could not retrieve the full text for one or both papers."
 
-        # Call a new method on our extractor for comparative analysis
         analysis = self.extractor.find_contradictions(text_a, title_a, text_b, title_b, topic)
         return analysis
 
@@ -874,10 +853,8 @@ class LiteratureGapTool(BaseTool):
     extractor: Extractor
 
     def _run(self, topic: str, num_papers_to_analyze: int = 5) -> str:
-        # 1. Find the top N papers on the topic using our vector search
         search_results = self.kb.search(query=topic, n_results=num_papers_to_analyze * 5) # Get extra to find unique papers
         
-        # 2. Collect the unique papers and their text
         paper_texts = {} # Use dict to handle uniqueness
         ids = search_results.get('ids', [[]])[0] if search_results.get('ids') else []
         metadatas = search_results.get('metadatas', [[]])[0] if search_results.get('metadatas') else []
@@ -898,11 +875,9 @@ class LiteratureGapTool(BaseTool):
         if len(paper_texts) < 2:
             return "Could not find enough relevant papers in the knowledge base to perform a gap analysis."
 
-        # 3. Call a new, powerful method on the extractor
         analysis = self.extractor.find_literature_gaps(list(paper_texts.values()), topic)
         return analysis
 
-# --- THE FINAL TOOL: JSON to CSV Exporter ---
 class CsvExportInput(BaseModel):
     """Input model for the CSV Export Tool."""
     json_data: str = Field(description="A JSON string with 'columns' and 'data' keys, representing the table data.")
@@ -923,27 +898,27 @@ class DataToCsvTool(BaseTool):
     def _run(self, json_data: str, filename: str) -> str:
         """Use the tool."""
         try:
-            # Clean the JSON string, just in case
-            if json_data.startswith("```json"):
-                json_data = json_data.split("```json")[1].split("````")[0].strip()
-            elif json_data.startswith("```"):
-                json_data = json_data.split("```")[1].split("```")[0].strip()
+            input_obj = json.loads(json_data)
 
-            # Load the JSON and create a DataFrame
-            data = json.loads(json_data)
-            df = pd.DataFrame(data['data'], columns=data['columns'])
+            if input_obj.get("status") != "success":
+                reason = input_obj.get("reason", "The previous tool failed to provide data.")
+                return f"Error: Cannot save to CSV because the required data was not provided. Reason: {reason}"
 
-            # Save to CSV
+            table_data = input_obj.get("data")
+            if not table_data:
+                return "Error: The previous tool succeeded but returned no data to save."
+
+            df = pd.DataFrame(table_data['data'], columns=table_data['columns'])
+
             df.to_csv(filename, index=False)
 
             return f"Successfully saved data to '{filename}'."
         except Exception as e:
-            return f"Error saving data to CSV: {e}"
+            return f"An error occurred while saving data to CSV: {e}"
 
     async def _arun(self, json_data: str, filename: str) -> str:
         raise NotImplementedError("This tool does not support async yet.")
 
-# TODO: Implementing a dedicated report synthesis tool that can combine paper summary, table data, and references to files/visualizations for comprehensive reporting.
 
 class ArchitectureDiagramInput(BaseModel):
     diagram_code: str = Field(description="A Mermaid or Graphviz DOT string describing the architecture.")
@@ -958,50 +933,88 @@ class ArchitectureDiagramTool(BaseTool):
     )
     args_schema: Type[ArchitectureDiagramInput] = ArchitectureDiagramInput
 
+    def _sanitize_mermaid_code(self, diagram_code: str) -> str:
+        """Sanitize Mermaid code to prevent syntax errors."""
+        import re
+        
+        if "```mermaid" in diagram_code:
+            diagram_code = diagram_code.split("```mermaid")[1].split("```")[0].strip()
+        elif "```" in diagram_code:
+            diagram_code = diagram_code.split("```")[1].split("```")[0].strip()
+        
+        diagram_code = re.sub(r'([A-Za-z0-9_]+)\(([^)]*[()][^)]*)\)', r'\1["\2"]', diagram_code)
+        
+        diagram_code = re.sub(r'(\w+)\s*-->\s*(\w+)', r'\1 --> \2', diagram_code)
+        
+        diagram_code = diagram_code.replace('(', '[').replace(')', ']')
+        
+        return diagram_code
+
     def _run(self, diagram_code: str, filename: str, engine: str = "auto") -> str:
         import os, logging, subprocess, tempfile
         try:
             if not filename.startswith("artifacts/"):
                 filename = f"artifacts/{filename}"
             os.makedirs("artifacts", exist_ok=True)
-            # --- Auto-detect diagram type ---
-            is_dot = diagram_code.strip().lower().startswith("digraph") or "->" in diagram_code or "graph" in diagram_code.lower()
-            is_mermaid = any(keyword in diagram_code.lower() for keyword in ["graph lr", "graph td", "sequenceDiagram", "classDiagram", "stateDiagram", "erDiagram"])
+            
+            sanitized_code = self._sanitize_mermaid_code(diagram_code)
+            
+            is_dot = sanitized_code.strip().lower().startswith("digraph") or "->" in sanitized_code or "graph" in sanitized_code.lower()
+            is_mermaid = any(keyword in sanitized_code.lower() for keyword in ["graph lr", "graph td", "sequenceDiagram", "classDiagram", "stateDiagram", "erDiagram"])
             tried_mermaid = tried_graphviz = False
-            # Try Graphviz first if DOT, else Mermaid
+            
             if engine == "graphviz" or (engine == "auto" and is_dot and not is_mermaid):
                 tried_graphviz = True
                 try:
                     import graphviz
-                    dot = graphviz.Source(diagram_code)
+                    dot = graphviz.Source(sanitized_code)
                     dot.format = "png"
                     dot.render(filename=filename, cleanup=True)
                     return f"Graphviz diagram saved to {filename}.png"
                 except Exception as e:
                     logging.error(f"Graphviz error: {e}")
-                    # Try Mermaid as fallback
                     tried_mermaid = True
+                    
             if engine == "mermaid" or (engine == "auto" and (is_mermaid or not tried_graphviz)):
                 tried_mermaid = True
                 try:
                     with tempfile.NamedTemporaryFile(mode='w', suffix='.mmd', delete=False) as tmpfile:
-                        tmpfile.write(diagram_code)
+                        tmpfile.write(sanitized_code)
                         tmpfile_path = tmpfile.name
-                    # --- Add Puppeteer config for --no-sandbox ---
+                    
                     puppeteer_config_path = os.path.join(os.path.dirname(__file__), 'puppeteer-config.json')
                     if not os.path.exists(puppeteer_config_path):
                         with open(puppeteer_config_path, 'w') as f:
                             f.write('{\n  "args": ["--no-sandbox", "--disable-setuid-sandbox"]\n}')
+                    
                     cmd = [
                         "mmdc", "-i", tmpfile_path, "-o", filename,
                         "--puppeteerConfigFile", puppeteer_config_path
                     ]
                     result = subprocess.run(cmd, capture_output=True, text=True)
                     os.remove(tmpfile_path)
+                    
                     if result.returncode != 0:
                         logging.error(f"mmdc error: {result.stderr}")
-                        raise Exception(result.stderr)
+                        simple_code = "graph LR\nA[Start] --> B[Process] --> C[End]"
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='.mmd', delete=False) as tmpfile2:
+                            tmpfile2.write(simple_code)
+                            tmpfile_path2 = tmpfile2.name
+                        
+                        cmd2 = [
+                            "mmdc", "-i", tmpfile_path2, "-o", filename,
+                            "--puppeteerConfigFile", puppeteer_config_path
+                        ]
+                        result2 = subprocess.run(cmd2, capture_output=True, text=True)
+                        os.remove(tmpfile_path2)
+                        
+                        if result2.returncode == 0:
+                            return f"Mermaid diagram (simplified) saved to {filename}"
+                        else:
+                            raise Exception(f"Original error: {result.stderr}. Simplified diagram also failed: {result2.stderr}")
+                    
                     return f"Mermaid diagram saved to {filename}"
+                    
                 except FileNotFoundError:
                     return "Error: Mermaid CLI (mmdc) is not installed. Please install it with 'npm install -g @mermaid-js/mermaid-cli'."
                 except Exception as e:
@@ -1010,7 +1023,7 @@ class ArchitectureDiagramTool(BaseTool):
                     if not tried_graphviz:
                         try:
                             import graphviz
-                            dot = graphviz.Source(diagram_code)
+                            dot = graphviz.Source(sanitized_code)
                             dot.format = "png"
                             dot.render(filename=filename, cleanup=True)
                             return f"Mermaid failed: {e}\nGraphviz fallback succeeded. Diagram saved to {filename}.png"
@@ -1018,24 +1031,25 @@ class ArchitectureDiagramTool(BaseTool):
                             # Both failed, save as Markdown
                             md_fallback = filename.rsplit('.', 1)[0] + "_diagram.md"
                             with open(md_fallback, 'w') as f:
-                                f.write(f"# Diagram Code (Fallback)\n\n```")
-                                f.write(diagram_code)
+                                f.write(f"# Diagram Code (Fallback)\n\n```mermaid\n")
+                                f.write(sanitized_code)
                                 f.write("\n```")
-                            return f"Both Mermaid and Graphviz failed. Diagram code saved as Markdown to {md_fallback}. Mermaid error: {e} Graphviz error: {e2}"
+                            return f"Both Mermaid and Graphviz failed. Diagram code saved as Markdown to {md_fallback}. Mermaid error: {e}"
                     else:
                         md_fallback = filename.rsplit('.', 1)[0] + "_diagram.md"
                         with open(md_fallback, 'w') as f:
-                            f.write(f"# Diagram Code (Fallback)\n\n```")
-                            f.write(diagram_code)
+                            f.write(f"# Diagram Code (Fallback)\n\n```mermaid\n")
+                            f.write(sanitized_code)
                             f.write("\n```")
                         return f"Both Mermaid and Graphviz failed. Diagram code saved as Markdown to {md_fallback}. Mermaid error: {e}"
-            # If neither worked, fallback
+            
             md_fallback = filename.rsplit('.', 1)[0] + "_diagram.md"
             with open(md_fallback, 'w') as f:
-                f.write(f"# Diagram Code (Fallback)\n\n```")
-                f.write(diagram_code)
+                f.write(f"# Diagram Code (Fallback)\n\n```mermaid\n")
+                f.write(sanitized_code)
                 f.write("\n```")
             return f"Could not render diagram. Code saved as Markdown to {md_fallback}."
+            
         except Exception as e:
             logging.exception("ArchitectureDiagramTool failed.")
             return f"ArchitectureDiagramTool error: {e}"

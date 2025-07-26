@@ -1,14 +1,13 @@
 from langchain.agents import AgentExecutor, create_json_chat_agent
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
-from typing import List, Any
+from typing import Any
 from langchain_neo4j import Neo4jGraph 
 
 from .knowledge_base import KnowledgeBase
 from .ingestor import Ingestor
 from .tools import (
-    GraphPaperFinderTool, 
-    QuestionAnsweringTool,   
+    GetPaperMetadataByTitleTool, 
+    AnswerFromPapersTool,   
     ArxivSearchTool,
     ArxivFetchTool,
     PaperSummarizationTool,
@@ -41,18 +40,15 @@ You have access to the following tools:
 The available tool names are: {tool_names}
 
 Here are some important rules to follow:
-1. After using a tool and getting an Observation, THINK about whether you have enough information to answer the user's question.
-2. If the user asks you to find or load papers, your job is done once you have successfully used the 'arxiv_paper_search_and_load_tool'. Your final answer should just confirm that the papers were loaded.
-3. The 'paper_summarization_tool' and 'arxiv_fetch_by_id_tool' require a unique 'paper_id'. The 'paper_id' can be found in the 'Source Metadata' from the 'paper_finder_tool'. You MUST extract the 'paper_id' from the metadata and use it as the input for these tools. Do NOT use the paper's title as the ID.
-4. **Data Flow:** The 'table_extraction_tool' outputs structured JSON. The 'plot_generation_tool' takes this JSON as its 'json_data' input. Ensure your plan connects these tools correctly.
-5. **CRITICAL RULE: When matching on string properties like 'title' in a Cypher query, ALWAYS use a case-insensitive search with 'toLower()' and 'CONTAINS'. For example: `WHERE toLower(p.title) CONTAINS 'attention'`. Do NOT use '=' for string matching.**
-6. When using a tool, ALWAYS provide ALL required arguments, using the EXACT argument names as specified in the tool's description/schema. Never invent argument names. If you are unsure, check the tool's schema.
-7. Do not get stuck in a loop. If a tool is not giving you the information you need, try a different tool or conclude that you cannot answer the question.
-8. Once you have a satisfactory answer, you MUST provide the final answer to the user in the specified format.
-9. Never call paper_summarization_tool or arxiv_fetch_by_id_tool with a null or missing paper_id. Always extract a valid string value from the metadata. If you cannot find a valid paper_id, do not call the tool and consider using another tool or asking the user for clarification.
-10. If, after 2 or 3 tool uses, you cannot find a direct answer to the user's question, provide a best-effort summary of what you did find, or explicitly state that the answer is not available in the knowledge base. Always provide a final answer, even if it is "I could not find an answer to your question in the current knowledge base."
-11. For questions about authors, collaborations, or relationships between papers (e.g., 'Who wrote X?', 'Who collaborated with Y?', 'What papers cite Z?'), always use the graph_query_tool. Do not use paper_finder_tool for these questions.
-12. When you receive a JSON list of papers from paper_finder_tool, extract the paper_id from the first paper and use it as input to paper_summarization_tool.
+1.  **Analyze Observations:** After using a tool, check the 'status' of the JSON observation. If `status: "failure"`, you MUST NOT repeat the same action. Analyze the 'reason' and try a different approach.
+2.  **Paper Loading:** If the user asks you to find or load papers, your job is done once you have successfully used the `arxiv_paper_search_and_load_tool`. Your final answer should just confirm the papers were loaded.
+3.  **Getting Paper IDs:** The `get_paper_metadata_by_title` tool returns a JSON object like `{"status": "success", "data": [{"paper_id": "...", "title": "...", "authors": [...]}]}`. To get the ID for a subsequent tool (like `paper_summarization_tool`), you must extract it from the **first item in the `data` list**. For example: `observation['data'][0]['paper_id']`.
+4.  **Data Flow:** The `table_extraction_tool` outputs structured JSON with a `status` and `data` key. The `dynamic_visualization_tool` and `data_to_csv_tool` require this entire JSON object as their `json_data` input.
+5.  **Cypher Queries:** When matching on string properties like 'title' in a Cypher query, ALWAYS use `toLower()` and `CONTAINS`. For example: `WHERE toLower(p.title) CONTAINS 'attention'`.
+6.  **Tool Arguments:** ALWAYS provide ALL required arguments with the EXACT argument names specified in the tool's description.
+7.  **Avoid Loops:** If a tool fails, try a different tool or conclude that you cannot answer the question. Do not get stuck.
+8.  **Final Answer:** Once you have a satisfactory answer, you MUST provide the final answer. If you cannot find an answer after 3-4 steps, provide a best-effort summary and state what you couldn't find.
+9.  **Author/Collaboration Questions:** For questions like 'Who wrote X?' or 'Who collaborated with Y?', always use the `graph_query_tool` with a Cypher query. Do not use `get_paper_metadata_by_title`.
 
 Use the following format for each step:
 
@@ -65,25 +61,25 @@ Action:
 }}
 ```
 
-# Examples (always use the exact argument names from the tool schema):
+# Examples (using the correct, current tool names):
 
-## paper_finder_tool (requires 'query' argument, not for author/collaboration questions):
+## Get Paper Metadata Example:
 ```json
 {{
-  "action": "paper_finder_tool",
+  "action": "get_paper_metadata_by_title",
   "action_input": {{"query": "Attention is All You Need"}}
 }}
 ```
 
-## question_answering_tool (requires 'question' argument):
+## Answering a Question from Papers (RAG) Example:
 ```json
 {{
-  "action": "question_answering_tool",
-  "action_input": {{"question": "What is Mixture of Experts?"}}
+  "action": "answer_from_papers",
+  "action_input": {{"question": "What is the Transformer architecture?"}}
 }}
 ```
 
-## arxiv_paper_search_and_load_tool (requires 'query' and optionally 'max_results'):
+## ArXiv Search Example:
 ```json
 {{
   "action": "arxiv_paper_search_and_load_tool",
@@ -91,7 +87,7 @@ Action:
 }}
 ```
 
-## graph_query_tool (for author/collaboration/relationship questions):
+## Graph Query (for Authors/Relationships) Example:
 ```json
 {{
   "action": "graph_query_tool",
@@ -99,56 +95,39 @@ Action:
 }}
 ```
 
-## paper summarization chain example:
-Thought: The user wants a summary of a specific paper. I should use paper_finder_tool to get the paper_id.
+## Full Paper Summarization Chain Example:
+Thought: The user wants a summary of a specific paper. First, I need to get its ID using `get_paper_metadata_by_title`.
 Action:
 ```json
 {{
-  "action": "paper_finder_tool",
+  "action": "get_paper_metadata_by_title",
   "action_input": {{"query": "Attention is All You Need"}}
 }}
 ```
-Observation: {{"papers": [{{"paper_id": "attention.pdf", "title": "Attention Is All You Need", "authors": "..."}}]}}
-Thought: I have found the paper_id. I should now use paper_summarization_tool with this paper_id.
+Observation: {{"status": "success", "data": [{{"paper_id": "http://arxiv.org/abs/1706.03762v5", "title": "Attention Is All You Need", "authors": ["Ashish Vaswani", "Noam Shazeer", "Niki Parmar", "Jakob Uszkoreit", "Llion Jones", "Aidan N. Gomez", "Lukasz Kaiser", "Illia Polosukhin"]}}]}}
+Thought: The tool succeeded and I have the paper_id: "http://arxiv.org/abs/1706.03762v5". Now I can use `paper_summarization_tool`.
 Action:
 ```json
 {{
   "action": "paper_summarization_tool",
-  "action_input": {{"paper_id": "attention.pdf"}}
+  "action_input": {{"paper_id": "http://arxiv.org/abs/1706.03762v5"}}
 }}
 ```
-Observation: "This paper introduces the Transformer architecture, which relies entirely on attention mechanisms..."
+Observation: "This paper introduces the Transformer architecture, which relies entirely on self-attention mechanisms..."
 Thought: I have gathered enough information. I will now provide the final answer.
 Action:
 ```json
 {{
   "action": "Final Answer",
-  "action_input": "Summary of 'Attention Is All You Need': This paper introduces the Transformer architecture, which relies entirely on attention mechanisms..."
+  "action_input": "Summary of 'Attention Is All You Need': This paper introduces the Transformer architecture, which relies entirely on self-attention mechanisms..."
 }}
 ```
 
-// INCORRECT: Do NOT do this!
-```json
-{{
-  "action": "paper_summarization_tool",
-  "action_input": {{"paper_id": null}}
-}}
-```
-
-Observation: The result from using the tool.
-... (this Thought/Action/Observation can repeat)
-Thought: I have gathered enough information. I will now provide the final answer.
-Action:
-```json
-{{
-  "action": "Final Answer",
-  "action_input": "The final, comprehensive answer to the user's original question."
-}}
-```
 Begin!
 Question: {input}
 Thought:{agent_scratchpad}
 """
+
 
 class PaperAgent:
     """
@@ -161,11 +140,10 @@ class PaperAgent:
         """
         print("--- Initializing Agentic System ---")
 
-        # 1. Initialize the LLM based on the provider
         if llm_provider == "google":
             if not os.getenv("GOOGLE_API_KEY"):
                 raise ValueError("GOOGLE_API_KEY not found in environment variables.")
-            llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash-lite", temperature=0.1)
+            llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.1)
         elif llm_provider == "local":
             llm = ChatOllama(
                 model="llama3:8b-instruct-q4_K_M",
@@ -175,9 +153,7 @@ class PaperAgent:
             raise ValueError(f"Unsupported LLM provider: {llm_provider}")
         print(f"LLM Initialized: {getattr(llm, 'model', 'unknown')}")
 
-        # 2. Initialize our core components
         self.ingestor = Ingestor()
-        # Read Neo4j and ChromaDB credentials from environment variables
         neo4j_uri = os.getenv("NEO4J_URI", "neo4j://localhost:7687")
         neo4j_user = os.getenv("NEO4J_USER", "neo4j")
         neo4j_password = os.getenv("NEO4J_PASSWORD", "password")
@@ -191,19 +167,14 @@ class PaperAgent:
             extractor_api_type = "local"
         self.extractor = Extractor(api_type=extractor_api_type, model=extractor_model)
         
-        # --- NEW: Initialize the Neo4jGraph utility ---
         graph = Neo4jGraph(url=neo4j_uri, username=neo4j_user, password=neo4j_password)
 
-        # 3. Create the RAG "sub-agent" for the KB tool
-        # This feels a bit circular, but it's a clean way to reuse our RAG logic
-        # We create a temporary RAG agent to pass to the tool.
         rag_sub_agent = self._create_rag_pipeline(llm)
 
-        # 4. Initialize the tool suite, including the new graph tool
         self.tools = [
             web_search_tool,
-            GraphPaperFinderTool(graph=graph), 
-            QuestionAnsweringTool(rag_agent=rag_sub_agent), 
+            GetPaperMetadataByTitleTool(graph=graph),
+            AnswerFromPapersTool(rag_agent=rag_sub_agent),
             GraphQueryTool(graph=graph), 
             ArxivSearchTool(ingestor=self.ingestor, kb=self.kb),
             ArxivFetchTool(ingestor=self.ingestor, kb=self.kb),
@@ -213,8 +184,7 @@ class PaperAgent:
             CitationAnalysisTool(graph=graph),             
             KeywordExtractionTool(kb=self.kb, extractor=self.extractor), 
             DynamicVisualizationTool(code_writing_llm=llm),
-            ArchitectureDiagramTool(),  # <-- Register the new tool here
-            # --- NEW TOOLS ---
+            ArchitectureDiagramTool(),
             ConflictingResultsTool(
                 name="conflicting_results_tool",
                 description="Use this tool to find and explain conflicting or contradictory findings between two specific papers. You must provide the two paper IDs and the topic of conflict.",
@@ -232,10 +202,8 @@ class PaperAgent:
         tool_names = ", ".join([str(t.name) for t in self.tools if t.name])
         print(f"Tools Initialized: [{tool_names}]")
 
-        # 5. Create the Agent using our NEW, more robust prompt
         prompt = ChatPromptTemplate.from_template(ROBUST_JSON_PROMPT_TEMPLATE)
         agent = create_json_chat_agent(llm, self.tools, prompt)
-        # 6. Create the Agent Executor, which runs the main loop (add max_iterations)
         self.agent_executor = AgentExecutor(
             agent=agent,
             tools=self.tools,
@@ -288,7 +256,6 @@ class PaperAgent:
         response = self.agent_executor.invoke({"input": user_query})
         return response
 
-    # --- NEW HELPER METHOD ---
     def run_single_tool(self, tool_name: str, tool_input: Any) -> str:
         """
         Executes a single tool directly without the full agentic loop.
@@ -297,9 +264,7 @@ class PaperAgent:
         if tool_name not in [tool.name for tool in self.tools]:
             return f"Error: Tool '{tool_name}' not found."
         try:
-            # Find the tool in our list
             tool_to_run = next(t for t in self.tools if t.name == tool_name)
-            # Use the tool's .run() method directly
             observation = tool_to_run.run(tool_input)
             return str(observation)
         except Exception as e:

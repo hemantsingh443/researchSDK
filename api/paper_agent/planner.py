@@ -24,7 +24,6 @@ class PlanningAgent:
     def _create_plan(self, user_query: str) -> List[str]:
         """Uses the LLM to create a step-by-step plan by first reflecting on the available tools."""
         
-        # --- THE KEY UPGRADE: Create a detailed tool manifest for the planner ---
         tool_manifest = ""
         for tool in self.executor_agent.tools:
             tool_manifest += f"Tool Name: {tool.name}\n"
@@ -65,7 +64,6 @@ class PlanningAgent:
                 raise
         plan_str = response.content
         
-        # More robust parsing of the plan
         plan = []
         if isinstance(plan_str, str):
             lines = plan_str.split('\n')
@@ -78,13 +76,11 @@ class PlanningAgent:
                 line = str(line)
             line = line.strip()
             if line and line[0].isdigit():
-                # Remove the leading number and period (handles "1. ", "2. ", "3) ", etc.)
                 split_line = line.split('.', 1)
                 if len(split_line) > 1:
                     step = split_line[1].lstrip(" )-")
                     plan.append(step)
                 else:
-                    # Fallback: just remove the first character (the digit)
                     plan.append(line[1:].lstrip(" )-."))
         
         print("--- Plan Created ---")
@@ -100,15 +96,12 @@ class PlanningAgent:
         if not plan:
             return "I could not create a plan to address your request."
 
-        # --- THE STATEFUL SCRATCHPAD ---
         scratchpad: Dict[str, str] = {"original_request": user_query}
         print("\n--- Executing Plan ---")
 
         for i, step in enumerate(plan):
             print(f"\n[Executing Step {i+1}/{len(plan)}]: {step}")
             
-            # Inject the current state (the scratchpad) into the prompt for the worker.
-            # This gives the worker memory of what has been learned so far.
             worker_prompt = f"""
             You are a diligent worker agent. Here is the current state of our project:
             ---
@@ -122,11 +115,9 @@ class PlanningAgent:
             response = self.executor_agent.run(worker_prompt)
             result = response.get('output', 'Step completed with no textual output.')
             
-            # Update the scratchpad with the result of the current step.
             scratchpad[f"result_of_step_{i+1}"] = result
             print(f"[Step {i+1} Complete]. Scratchpad updated.")
 
-        # Final synthesis step, now with a rich scratchpad of all results.
         final_synthesis_prompt = f"""
 You are a brilliant scientific analyst and writer. The project to answer '{user_query}' is complete.
 Here is the full project scratchpad containing all the data, summaries, and artifacts you have generated:
