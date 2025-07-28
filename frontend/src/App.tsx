@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
 import ArtifactList from './components/ArtifactList';
+import MarkdownRenderer from './components/MarkdownRenderer';
 
 type Tab = 'chat' | 'artifacts';
 
@@ -141,22 +142,25 @@ function App() {
       <div className="flex-1 p-4 overflow-y-auto">
         <div className="max-w-3xl mx-auto space-y-4">
           {messages.map((message) => (
-            <div
-              key={message.id}
-              className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'}`}
+            <div 
+              key={message.id} 
+              className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'} mb-4`}
             >
-              <div
-                className={`max-w-xs md:max-w-md lg:max-w-lg xl:max-w-xl rounded-lg px-4 py-2 ${
-                  message.sender === 'user'
-                    ? 'bg-blue-500 text-white rounded-br-none'
-                    : 'bg-white text-gray-800 shadow rounded-bl-none'
+              <div 
+                className={`max-w-3xl rounded-lg px-4 py-3 ${
+                  message.sender === 'user' 
+                    ? 'bg-blue-500 text-white' 
+                    : 'bg-gray-100 dark:bg-gray-700'
                 }`}
               >
-                <p className="whitespace-pre-wrap break-words">{message.text}</p>
-                <p className="text-xs opacity-70 mt-1">
-                  {message.timestamp.toLocaleTimeString()}
-                </p>
+                <MarkdownRenderer 
+                  content={message.text} 
+                  className={message.sender === 'user' ? 'text-white' : 'text-gray-800 dark:text-gray-200'}
+                />
               </div>
+              <p className="text-xs opacity-70 mt-1">
+                {message.timestamp.toLocaleTimeString()}
+              </p>
             </div>
           ))}
           {isLoading && (

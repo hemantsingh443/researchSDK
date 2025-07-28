@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import type { Artifact } from '../types/artifact';
-import { getArtifacts, deleteArtifact, downloadArtifact } from '../services/artifactService';
-import { formatBytes, formatDate } from '../utils/formatters';
+import { getArtifacts, deleteArtifact, downloadArtifact, getArtifactContent } from '../services/artifactService';
+import { formatBytes, formatDate, isMarkdownFile, isTextFile } from '../utils/formatters';
+import MarkdownRenderer from './MarkdownRenderer';
 
 // Icons
 const FileIcon = () => (
@@ -32,6 +33,7 @@ const ArtifactList: React.FC<ArtifactListProps> = ({ className }) => {
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<Record<string, boolean>>({});
   const [downloading, setDownloading] = useState<Record<string, boolean>>({});
+  const [previews, setPreviews] = useState<Record<string, { content: string; loading: boolean; error?: string }>>({});
 
   const fetchArtifacts = async () => {
     try {
@@ -73,6 +75,45 @@ const ArtifactList: React.FC<ArtifactListProps> = ({ className }) => {
       setError(err instanceof Error ? err.message : 'Failed to download artifact');
     } finally {
       setDownloading(prev => ({ ...prev, [name]: false }));
+    }
+  };
+
+  const togglePreview = async (artifact: Artifact) => {
+    const artifactName = artifact.name;
+    
+    // If preview is already loaded or loading, just toggle the preview
+    if (previews[artifactName]) {
+      const newPreviews = { ...previews };
+      delete newPreviews[artifactName];
+      setPreviews(newPreviews);
+      return;
+    }
+
+    // Start loading the preview
+    setPreviews(prev => ({
+      ...prev,
+      [artifactName]: { content: '', loading: true }
+    }));
+
+    try {
+      const content = await getArtifactContent(artifactName);
+      setPreviews(prev => ({
+        ...prev,
+        [artifactName]: { 
+          content,
+          loading: false 
+        }
+      }));
+    } catch (err) {
+      console.error('Failed to load preview:', err);
+      setPreviews(prev => ({
+        ...prev,
+        [artifactName]: { 
+          content: '', 
+          loading: false, 
+          error: 'Failed to load preview' 
+        }
+      }));
     }
   };
 
@@ -157,9 +198,22 @@ const ArtifactList: React.FC<ArtifactListProps> = ({ className }) => {
           {artifacts.map((artifact) => (
             <li key={artifact.name} className="px-4 py-4 sm:px-6 hover:bg-gray-50 transition-colors duration-150">
               <div className="flex items-center justify-between">
-                <div className="flex items-center min-w-0">
-                  <div className="flex-shrink-0 h-10 w-10 flex items-center justify-center rounded-md bg-blue-50 text-blue-600 mr-4">
-                    <FileIcon />
+                <div 
+                  className="flex items-center min-w-0 cursor-pointer"
+                  onClick={() => isTextFile(artifact.name) && togglePreview(artifact)}
+                >
+                  <div className={`flex-shrink-0 h-10 w-10 flex items-center justify-center rounded-md ${isMarkdownFile(artifact.name) ? 'bg-green-50 text-green-600' : isTextFile(artifact.name) ? 'bg-blue-50 text-blue-600' : 'bg-gray-50 text-gray-600'} mr-4`}>
+                    {isMarkdownFile(artifact.name) ? (
+                      <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                    ) : isTextFile(artifact.name) ? (
+                      <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                    ) : (
+                      <FileIcon />
+                    )}
                   </div>
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium text-gray-900 truncate">
@@ -169,10 +223,30 @@ const ArtifactList: React.FC<ArtifactListProps> = ({ className }) => {
                       <span>{formatBytes(artifact.size)}</span>
                       <span className="mx-2">•</span>
                       <span>{formatDate(artifact.created)}</span>
+                      {isTextFile(artifact.name) && (
+                        <span className="ml-2 px-2 py-0.5 bg-gray-100 text-gray-500 text-xs rounded-full">
+                          {isMarkdownFile(artifact.name) ? 'Markdown' : 'Text'}
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>
                 <div className="ml-4 flex-shrink-0 flex space-x-2">
+                  {isTextFile(artifact.name) && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        togglePreview(artifact);
+                      }}
+                      className="inline-flex items-center px-3 py-1.5 border border-gray-300 shadow-sm text-xs font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                    >
+                      {previews[artifact.name] ? (
+                        'Hide Preview'
+                      ) : (
+                        'Preview Content'
+                      )}
+                    </button>
+                  )}
                   <button
                     onClick={() => handleDownload(artifact.name)}
                     disabled={downloading[artifact.name]}
@@ -214,6 +288,25 @@ const ArtifactList: React.FC<ArtifactListProps> = ({ className }) => {
                     )}
                   </button>
                 </div>
+                {previews[artifact.name] && (
+                  <div className="mt-2 w-full border-t border-gray-200 pt-3">
+                    {previews[artifact.name].loading ? (
+                      <div className="flex justify-center py-4">
+                        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
+                      </div>
+                    ) : previews[artifact.name].error ? (
+                      <div className="text-sm text-red-500">{previews[artifact.name].error}</div>
+                    ) : isMarkdownFile(artifact.name) ? (
+                      <div className="prose max-w-none p-2 bg-gray-50 rounded-md">
+                        <MarkdownRenderer content={previews[artifact.name].content} />
+                      </div>
+                    ) : (
+                      <pre className="text-sm bg-gray-50 p-3 rounded-md overflow-x-auto">
+                        {previews[artifact.name].content}
+                      </pre>
+                    )}
+                  </div>
+                )}
               </div>
             </li>
           ))}

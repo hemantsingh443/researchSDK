@@ -76,3 +76,22 @@ export const downloadArtifact = async (name: string): Promise<void> => {
     throw new Error(`Failed to download artifact: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 };
+
+/**
+ * Fetches the content of an artifact as text
+ * @param name The name of the artifact to fetch content for
+ * @returns A promise that resolves to the content of the artifact as a string
+ */
+export const getArtifactContent = async (name: string): Promise<string> => {
+  try {
+    const url = `${API_BASE_URL}/artifacts/${encodeURIComponent(name)}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      return await handleApiError(response);
+    }
+    return await response.text();
+  } catch (error) {
+    console.error('Error fetching artifact content:', error);
+    throw new Error('Failed to load artifact content. The file may be binary or corrupted.');
+  }
+};

@@ -50,24 +50,7 @@ class FailureResponse(StandardResponse):
 # --- Tool Factory Function ---
 
 def get_tools(kb: KnowledgeBase, extractor: Extractor, ingestor: Ingestor, llm: BaseChatModel) -> List[BaseTool]:
-    """Factory function to create and return all available tools with proper dependencies.
-    
-    This centralizes tool instantiation and ensures consistent dependency injection.
-    Tools are organized by category (search, analysis, visualization, etc.) for better maintainability.
-    
-    Args:
-        kb: The KnowledgeBase instance for database operations
-        extractor: The Extractor instance for text processing and analysis
-        ingestor: The Ingestor instance for loading and processing papers
-        llm: The language model for tools that require text generation or analysis
-        
-    Returns:
-        List[BaseTool]: A list of tool instances ready for use with the agent
-        
-    Note:
-        All tools are configured with proper error handling and return structured responses
-        with success/failure status and consistent data formats.
-    """
+    """Factory function to create and return all available tools with proper dependencies."""
     # Search and retrieval tools
     search_tools = [
         DuckDuckGoSearchRun(),
@@ -75,14 +58,12 @@ def get_tools(kb: KnowledgeBase, extractor: Extractor, ingestor: Ingestor, llm: 
         GetPaperMetadataByTitleTool(kb=kb, llm=llm)
     ]
     
-    # Content analysis tools
+    # Content analysis tools (non-graph based)
     analysis_tools = [
-        # Using the AnswerFromPapersTool that takes kb and llm directly
-        AnswerFromPapersTool(kb=kb, llm=llm),  # This uses the first AnswerFromPapersTool class
+        AnswerFromPapersTool(kb=kb, llm=llm),
         PaperSummarizationTool(kb=kb, extractor=extractor, llm=llm),
         KeywordExtractionTool(kb=kb, extractor=extractor, llm=llm),
         LiteratureGapTool(kb=kb, extractor=extractor, llm=llm),
-        CitationAnalysisTool(graph=graph, paper_id="default_paper_id")
     ]
     
     # Data extraction and processing tools
@@ -97,57 +78,40 @@ def get_tools(kb: KnowledgeBase, extractor: Extractor, ingestor: Ingestor, llm: 
         PlotGenerationTool(llm=llm)
     ]
     
-    # Graph and relationship tools
+    # Initialize graph tools if Neo4j is available
     graph_tools = []
-    
     try:
-        print("\n=== Initializing Graph Tools ===")
-        print("Attempting to import required modules...")
-        
         from neo4j import GraphDatabase
         from langchain_neo4j import Neo4jGraph
         from paper_agent.config import settings
         
-        print("Modules imported successfully")
+        print("\n=== Initializing Graph Tools ===")
         print(f"Neo4j URI: {settings.NEO4J_URI}")
-        print(f"Neo4j User: {settings.NEO4J_USER}")
-        print(f"Neo4j Database: {settings.NEO4J_DATABASE}")
         
-        # Initialize Neo4j graph connection using the new package
-        print("\nAttempting to connect to Neo4j using langchain-neo4j...")
-        try:
-            graph = Neo4jGraph(
-                url=settings.NEO4J_URI,
-                username=settings.NEO4J_USER,
-                password=settings.NEO4J_PASSWORD,
-                database=settings.NEO4J_DATABASE or "neo4j"  # Provide default database
-            )
-            
-            print("Successfully connected to Neo4j using langchain-neo4j!")
-            
-            # Test the connection with a simple query
-            try:
-                test_query = "RETURN 1 as test_value"
-                result = graph.query(test_query)
-                print(f"Neo4j test query result: {result}")
-            except Exception as e:
-                print(f"Warning: Neo4j test query failed: {str(e)}")
-        except Exception as e:
-            print(f"Failed to initialize Neo4j connection: {str(e)}")
-            raise
+        # Initialize Neo4j graph connection
+        graph = Neo4jGraph(
+            url=settings.NEO4J_URI,
+            username=settings.NEO4J_USER,
+            password=settings.NEO4J_PASSWORD,
+            database=settings.NEO4J_DATABASE or "neo4j"
+        )
         
-        # Add graph tools if connection is successful
-        print("\nInitializing graph tools...")
-        graph_tools.extend([
+        # Test the connection
+        test_query = "RETURN 1 as test_value"
+        result = graph.query(test_query)
+        print(f"Neo4j test query result: {result}")
+        
+        # Initialize graph tools
+        graph_tools = [
             GraphQueryTool(graph=graph),
             RelationshipAnalysisTool(graph=graph, llm=llm),
             CitationAnalysisTool(graph=graph, paper_id="default_paper_id")
-        ])
+        ]
         
         print("Successfully initialized graph tools:")
         for tool in graph_tools:
             print(f"- {tool.name}: {tool.__class__.__name__}")
-        
+            
     except Exception as e:
         import traceback
         print(f"\n❌ Error initializing graph tools:")
@@ -157,17 +121,9 @@ def get_tools(kb: KnowledgeBase, extractor: Extractor, ingestor: Ingestor, llm: 
         traceback.print_exc()
         print("\nGraph functionality will be disabled. Make sure Neo4j is running and properly configured.")
     
-    # Combine all tools into a single list
-    all_tools = (
-        search_tools + 
-        analysis_tools + 
-        extraction_tools + 
-        visualization_tools + 
-        graph_tools
-    )
-    
-    # Log the tools being returned
-    print(f"Initialized {len(all_tools)} tools: {[tool.name for tool in all_tools]}")
+    # Combine all tools
+    all_tools = search_tools + analysis_tools + extraction_tools + visualization_tools + graph_tools
+    print(f"\nInitialized {len(all_tools)} tools: {[tool.name for tool in all_tools]}")
     
     return all_tools
 
@@ -266,7 +222,7 @@ class ArxivSearchTool(BaseTool):
         "from arXiv. This downloads the papers' PDFs and adds them to the knowledge base "
         "for other tools to use."
     )
-    args_schema: Type[BaseModel] = ArxivSearchInput
+    args_schema: Type[ArxivSearchInput] = ArxivSearchInput
 
     ingestor: Ingestor
     kb: KnowledgeBase
@@ -312,8 +268,8 @@ class ArxivSearchTool(BaseTool):
                 data={"query": query, "max_results": max_results}
             ).dict()
 
-    async def _arun(self, query: str, max_results: int) -> Dict[str, Any]:
-        """Async version of the tool (not implemented)."""
+    async def _arun(self, query: str, max_results: int = 3) -> Dict[str, Any]:
+        """Async version of the tool."""
         return self._run(query, max_results)
 
 
@@ -579,10 +535,7 @@ class PaperSummarizationTool(BaseTool):
 
     def _get_paper_by_id(self, paper_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a paper from the knowledge base by its ID."""
-        results = self.kb.collection.get(
-            where={"paper_id": paper_id},
-            include=['documents', 'metadatas']
-        )
+        results = self.kb.collection.get(where={"paper_id": paper_id})
         if not results or 'documents' not in results or not results['documents']:
             return None
         return results
@@ -819,7 +772,7 @@ class TableExtractionTool(BaseTool):
             # Get paper metadata
             full_text = " ".join(results['documents'])
             metadatas = results.get('metadatas', [{}])
-            title = str(metadatas[0].get('title', 'Unknown Title'))
+            title = metadatas[0].get('title', 'Unknown Title')
             
             # Try LLM-based extraction first
             try:
@@ -1226,7 +1179,7 @@ class KeywordExtractionTool(BaseTool):
         "Use this to identify the main topics, concepts, or keywords of a specific paper. "
         "Provide the paper_id and optionally the number of keywords to extract (default: 10)."
     )
-    args_schema: Type[BaseModel] = KeywordExtractionInput
+    args_schema: Type[KeywordExtractionInput] = KeywordExtractionInput
     
     kb: KnowledgeBase
     extractor: Extractor
