@@ -5,7 +5,7 @@ __pycache__/
 paper_db/ 
 attention.pdf
 
-
+.env.local
 
 
 

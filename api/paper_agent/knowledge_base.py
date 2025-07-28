@@ -1,79 +1,342 @@
+import os
+import logging
+from typing import List, Dict, Any, Optional, Union
+
 import chromadb
+from chromadb.config import Settings
 from chromadb.utils import embedding_functions
-from .structures import Paper
-from typing import List, Any
+from neo4j import GraphDatabase, exceptions as neo4j_exceptions
 from tqdm import tqdm
-from neo4j import GraphDatabase
+
+from .structures import Paper
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class KnowledgeBase:
     """
     Manages both a vector store (ChromaDB) for semantic search and a
     graph database (Neo4j) for structured relationships.
+    
+    Supports both local and Docker-based ChromaDB instances, with configurable
+    embedding models and persistence options.
     """
-    def __init__(self, db_path: str = "./paper_db", neo4j_uri = "neo4j://172.20.128.55:7687", neo4j_user="neo4j", neo4j_password="password"):
-        """
-        Initializes both ChromaDB and the Neo4j driver.
-        """
-        self.client = chromadb.PersistentClient(path=db_path)
-        self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-        self.collection = self.client.get_or_create_collection(name="papers", embedding_function=self.embedding_function) 
+    
+    def __init__(
+        self,
+        db_path: str = "./paper_db",
+        chroma_host: Optional[str] = None,
+        chroma_port: int = 8000,
+        collection_name: str = "papers",
+        embedding_model: str = "all-MiniLM-L6-v2",
+        neo4j_uri: str = "bolt://localhost:7687",
+        neo4j_user: str = "neo4j",
+        neo4j_password: str = "password",
+        persist: bool = True
+    ):
+        """Initialize the KnowledgeBase with ChromaDB and Neo4j connections.
         
+        Args:
+            db_path: Path to store the ChromaDB data (for local mode)
+            chroma_host: Hostname or IP of ChromaDB server (if using Docker)
+            chroma_port: Port of ChromaDB server
+            collection_name: Name of the Chroma collection to use
+            embedding_model: Name of the SentenceTransformer model to use
+            neo4j_uri: URI of the Neo4j database
+            neo4j_user: Username for Neo4j authentication
+            neo4j_password: Password for Neo4j authentication
+            persist: Whether to persist the ChromaDB to disk (local mode only)
+        """
+        self.collection_name = collection_name
+        self._init_chroma(chroma_host, chroma_port, db_path, embedding_model, persist)
+        self._init_neo4j(neo4j_uri, neo4j_user, neo4j_password)
+        
+        logger.info(
+            f"KnowledgeBase initialized. Vector DB: {'Docker' if chroma_host else 'Local'}. "
+            f"Graph DB: {neo4j_uri}."
+        )
+    
+    def _init_chroma(
+        self,
+        host: Optional[str],
+        port: int,
+        db_path: str,
+        embedding_model: str,
+        persist: bool
+    ) -> None:
+        """Initialize the ChromaDB client and collection."""
         try:
-            self.neo4j_driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
-            self.neo4j_driver.verify_connectivity()
-            print(f"KnowledgeBase initialized. Vector DB at: {db_path}. Graph DB at: {neo4j_uri}.")
+            # Initialize embedding function
+            self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name=embedding_model
+            )
+            
+            # Configure Chroma client based on whether we're using Docker or local
+            if host:
+                # Docker/remote mode
+                self.client = chromadb.HttpClient(
+                    host=host,
+                    port=port,
+                    ssl=False,
+                    headers={"Authorization": f"Bearer {os.getenv('CHROMA_SERVER_AUTH_CREDENTIALS', '')}"}
+                    if os.getenv('CHROMA_SERVER_AUTH_CREDENTIALS') else None
+                )
+            else:
+                # Local mode - using the new persistent client
+                self.client = chromadb.PersistentClient(
+                    path=db_path if persist else None,
+                    settings=Settings(
+                        allow_reset=True,
+                        anonymized_telemetry=False
+                    )
+                )
+            
+            # Get or create the collection with the new API
+            try:
+                # Try to get the collection first
+                self.collection = self.client.get_collection(
+                    name=self.collection_name,
+                    embedding_function=self.embedding_function
+                )
+            except Exception as e:
+                # If collection doesn't exist, create it
+                if "does not exist" in str(e).lower():
+                    self.collection = self.client.create_collection(
+                        name=self.collection_name,
+                        embedding_function=self.embedding_function,
+                        metadata={"hnsw:space": "cosine"}  # Optional: specify the distance metric
+                    )
+                else:
+                    raise
+            
+            logger.info(f"Initialized ChromaDB collection: {self.collection_name}")
+            
         except Exception as e:
-            print(f"CRITICAL: Could not connect to Neo4j database. Please ensure it is running. Error: {e}")
+            logger.error(f"Failed to initialize ChromaDB: {e}")
+            raise
+    
+    def _init_neo4j(self, uri: str, user: str, password: str) -> None:
+        """Initialize the Neo4j driver with error handling."""
+        try:
+            self.neo4j_driver = GraphDatabase.driver(uri, auth=(user, password))
+            self.neo4j_driver.verify_connectivity()
+        except neo4j_exceptions.ServiceUnavailable as e:
+            logger.warning(f"Neo4j service unavailable at {uri}. Graph features will be disabled. Error: {e}")
+            self.neo4j_driver = None
+        except Exception as e:
+            logger.error(f"Failed to initialize Neo4j: {e}")
             self.neo4j_driver = None
 
-    def close(self):
-        """Closes the Neo4j driver connection."""
-        if self.neo4j_driver:
-            self.neo4j_driver.close()
+    def close(self) -> None:
+        """Close all database connections."""
+        # Close Neo4j driver if it exists
+        if hasattr(self, 'neo4j_driver') and self.neo4j_driver:
+            try:
+                self.neo4j_driver.close()
+                logger.info("Neo4j connection closed successfully.")
+            except Exception as e:
+                logger.error(f"Error closing Neo4j connection: {e}")
+        
+        # Close ChromaDB client if it exists and is persistent
+        if hasattr(self, 'client') and not isinstance(self.client, chromadb.HttpClient):
+            try:
+                self.client.persist()
+                logger.info("ChromaDB changes persisted to disk.")
+            except Exception as e:
+                logger.error(f"Error persisting ChromaDB: {e}")
 
-    def _add_paper_to_graph(self, paper: Paper):
-        """A private helper method to add a single paper and its authors to Neo4j."""
-        if not self.neo4j_driver:
-            return
-
-        with self.neo4j_driver.session() as session:
-            session.run("""
-                MERGE (p:Paper {id: $paper_id})
-                ON CREATE SET p.title = $title
-                """, paper_id=paper.paper_id, title=paper.title)
-
-            for author in paper.authors:
-                session.run("""
-                    MERGE (a:Author {name: $author_name})
-                    WITH a
-                    MATCH (p:Paper {id: $paper_id})
-                    MERGE (a)-[:AUTHORED]->(p)
-                    """, author_name=author.name, paper_id=paper.paper_id)
-
-            if hasattr(paper, 'citations') and paper.citations:
-                for cited_paper_title in paper.citations:
-                    session.run("MERGE (cp:Paper {title: $title})", title=cited_paper_title)
-                    session.run("""
-                        MATCH (p1:Paper {id: $paper_id})
-                        MATCH (p2:Paper {title: $cited_title})
-                        MERGE (p1)-[:CITES]->(p2)
-                        """, paper_id=paper.paper_id, cited_title=cited_paper_title)
-
-    def _split_text_into_chunks(self, markdown_text: str, chunk_size: int = 2000) -> List[str]:
+    def _add_paper_to_graph(self, paper: Paper) -> bool:
+        """Add a single paper and its authors to Neo4j.
+        
+        Args:
+            paper: The paper to add to the graph
+            
+        Returns:
+            bool: True if the operation was successful, False otherwise
         """
-        Splits Markdown text by headers, creating semantically relevant chunks.
-        If a chunk is too large, further splits by sentences.
+        if not self.neo4j_driver:
+            logger.warning("Cannot add paper to graph: Neo4j driver not initialized")
+            return False
+            
+        try:
+            with self.neo4j_driver.session() as session:
+                # Add paper node
+                session.execute_write(
+                    lambda tx: tx.run(
+                        """
+                        MERGE (p:Paper {id: $paper_id})
+                        ON CREATE SET p.title = $title,
+                                      p.abstract = $abstract,
+                                      p.published = $published
+                        ON MATCH SET p.title = $title,
+                                     p.abstract = $abstract,
+                                     p.published = $published
+                        """,
+                        paper_id=paper.paper_id,
+                        title=paper.title,
+                        abstract=getattr(paper, 'abstract', ''),
+                        published=getattr(paper, 'published', '')
+                    )
+                )
+
+                # Add authors and relationships
+                for author in paper.authors:
+                    session.execute_write(
+                        lambda tx: tx.run(
+                            """
+                            MERGE (a:Author {name: $author_name})
+                            WITH a
+                            MATCH (p:Paper {id: $paper_id})
+                            MERGE (a)-[:AUTHORED]->(p)
+                            """,
+                            author_name=author.name,
+                            paper_id=paper.paper_id
+                        )
+                    )
+
+                # Add citations if available
+                if hasattr(paper, 'citations') and paper.citations:
+                    for cited_paper_title in paper.citations:
+                        session.execute_write(
+                            lambda tx: tx.run(
+                                """
+                                MERGE (p1:Paper {id: $paper_id})
+                                MERGE (p2:Paper {title: $cited_title})
+                                MERGE (p1)-[r:CITES]->(p2)
+                                """,
+                                paper_id=paper.paper_id,
+                                cited_title=cited_paper_title
+                            )
+                        )
+            
+            logger.debug(f"Successfully added paper to graph: {paper.title}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error adding paper to graph: {e}")
+            return False
+
+    def _split_text_into_chunks(
+        self,
+        markdown_text: str,
+        chunk_size: int = 2000,
+        chunk_overlap: int = 200
+    ) -> List[Dict[str, Any]]:
+        """Split Markdown text into chunks with metadata.
+        
+        Args:
+            markdown_text: The Markdown text to split
+            chunk_size: Maximum size of each chunk in characters
+            chunk_overlap: Number of characters to overlap between chunks
+            
+        Returns:
+            List of dictionaries containing 'text' and 'metadata' for each chunk
         """
         import re
-        chunks = re.split(r'(?=\n##\s)', markdown_text)
-        final_chunks = []
-        for chunk in chunks:
-            if len(chunk) > chunk_size:
-                sub_chunks = re.split(r'(?<=\.)\s', chunk)
-                final_chunks.extend([s.strip() for s in sub_chunks if s.strip()])
-            elif chunk.strip():
-                final_chunks.append(chunk.strip())
-        return final_chunks
+        from typing import List, Dict, Any
+        
+        # First split by major sections (h1, h2, h3 headers)
+        # Using positive lookbehind with fixed width (\n followed by 1-3 # and a space)
+        sections = re.split(r'(?<=\n)(?=#{1,3}\s)', markdown_text)
+        
+        chunks = []
+        current_chunk = ""
+        current_headers = []
+        
+        for section in sections:
+            # Extract header if this section starts with one
+            header_match = re.match(r'^(#+)\s*(.*?)\n', section, re.DOTALL)
+            if header_match:
+                header_level = len(header_match.group(1))
+                header_text = header_match.group(2).strip()
+                section_content = section[header_match.end():].strip()
+                
+                # Update current headers stack
+                current_headers = current_headers[:header_level-1] + [header_text]
+            else:
+                section_content = section.strip()
+            
+            # If section is empty, skip it
+            if not section_content:
+                continue
+                
+            # If section is too big, split by paragraphs
+            if len(section_content) > chunk_size:
+                paragraphs = re.split(r'\n\s*\n', section_content)
+                for para in paragraphs:
+                    para = para.strip()
+                    if not para:
+                        continue
+                        
+                    # If paragraph is still too big, split by sentences
+                    if len(para) > chunk_size:
+                        sentences = re.split(r'(?<=[.!?])\s+', para)
+                        current_sentence_group = []
+                        current_group_size = 0
+                        
+                        for sent in sentences:
+                            sent = sent.strip()
+                            if not sent:
+                                continue
+                                
+                            sent_size = len(sent)
+                            
+                            # If adding this sentence would exceed chunk size (with some room for overlap)
+                            if current_group_size + sent_size > chunk_size - chunk_overlap and current_sentence_group:
+                                # Save current group as a chunk
+                                chunk_text = ' '.join(current_sentence_group)
+                                chunks.append({
+                                    'text': chunk_text,
+                                    'metadata': {
+                                        'headers': current_headers,
+                                        'chunk_type': 'sentence_group',
+                                        'chunk_size': len(chunk_text)
+                                    }
+                                })
+                                
+                                # Start new group with overlap
+                                overlap_start = max(0, len(current_sentence_group) // 2)
+                                current_sentence_group = current_sentence_group[overlap_start:]
+                                current_group_size = sum(len(s) + 1 for s in current_sentence_group)
+                            
+                            # Add current sentence to group
+                            current_sentence_group.append(sent)
+                            current_group_size += sent_size + 1
+                        
+                        # Add any remaining sentences
+                        if current_sentence_group:
+                            chunk_text = ' '.join(current_sentence_group)
+                            chunks.append({
+                                'text': chunk_text,
+                                'metadata': {
+                                    'headers': current_headers,
+                                    'chunk_type': 'sentence_group',
+                                    'chunk_size': len(chunk_text)
+                                }
+                            })
+                    else:
+                        # Paragraph is a good size, add as is
+                        chunks.append({
+                            'text': para,
+                            'metadata': {
+                                'headers': current_headers,
+                                'chunk_type': 'paragraph',
+                                'chunk_size': len(para)
+                            }
+                        })
+            else:
+                # Section is a good size, add as is
+                chunks.append({
+                    'text': section_content,
+                    'metadata': {
+                        'headers': current_headers,
+                        'chunk_type': 'section',
+                        'chunk_size': len(section_content)
+                    }
+                })
+        
+        return chunks
 
     def add_papers(self, papers: List[Paper]):
         """
@@ -99,12 +362,16 @@ class KnowledgeBase:
                 
                 for i, chunk in enumerate(chunks):
                     chunk_id = f"{paper.paper_id}_chunk_{i}"
+                    # Extract the text content from the chunk
+                    chunk_text = chunk['text'] if isinstance(chunk, dict) else str(chunk)
                     metadata = {
                         "paper_id": paper.paper_id or "unknown_id",
                         "title": paper.title or "Title Not Available",
-                        "authors": ", ".join([a.name for a in paper.authors]) if paper.authors else "Authors Not Available"
+                        "authors": ", ".join([a.name for a in paper.authors]) if paper.authors else "Authors Not Available",
+                        "chunk_type": chunk.get('metadata', {}).get('chunk_type', 'unknown') if isinstance(chunk, dict) else 'unknown',
+                        "headers": " > ".join(chunk.get('metadata', {}).get('headers', [])) if isinstance(chunk, dict) and chunk.get('metadata', {}).get('headers') else ""
                     }
-                    all_chunks.append(chunk)
+                    all_chunks.append(chunk_text)
                     all_metadatas.append(metadata)
                     all_ids.append(chunk_id)
 

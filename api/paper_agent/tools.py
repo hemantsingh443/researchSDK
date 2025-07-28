@@ -1,77 +1,321 @@
-from langchain_neo4j import Neo4jGraph 
-from langchain.tools import BaseTool, DuckDuckGoSearchRun
-from typing import Type, Any
-from pydantic import BaseModel, Field
+"""Tools for the Paper Agent system.
+
+This module contains various tools that the agent can use to interact with papers,
+extract information, and perform analyses. The tools are designed to be used with
+the MasterAgent class.
+"""
+
+import os
+import json
+import re
+import shutil
+import tempfile
+import subprocess
+import logging
+from typing import Type, Any, List, Dict, Optional, Union
+
 import pandas as pd
 import matplotlib.pyplot as plt
-from io import StringIO
-import json 
 import numpy as np
-import os
-from langchain_core.language_models.chat_models import BaseChatModel 
-import shutil
+from pydantic import BaseModel, Field
+from langchain_community.tools import BaseTool, DuckDuckGoSearchRun
+from langchain_community.utilities import ArxivAPIWrapper
+from langchain_neo4j import Neo4jGraph
+from langchain_core.language_models.chat_models import BaseChatModel
+
 from .knowledge_base import KnowledgeBase
 from .ingestor import Ingestor
 from .extractor import Extractor
 
-web_search_tool = DuckDuckGoSearchRun()
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+# --- Standard Response Models ---
 
-class KBQueryInput(BaseModel):
-    """Input model for the Knowledge Base Query Tool."""
-    query: str = Field(description="A detailed, specific question to ask the knowledge base.")
+class StandardResponse(BaseModel):
+    """Base response model for all tools."""
+    status: str = Field(description="Indicates 'success' or 'failure'.")
+    message: str = Field(description="A human-readable message about the result.")
+    data: Optional[Any] = Field(default=None, description="The result data if the operation was successful.")
 
-class KnowledgeBaseQueryTool(BaseTool):
-    """A tool to answer questions about scientific papers."""
-    name: str = "scientific_paper_knowledge_base_tool" 
-    description: str = (
-        "**This is the primary tool.** Use this tool FIRST for any question about "
-        "scientific topics, research papers, methodologies, or experimental results. "
-        "It uses a specialized database of academic papers."
-    )
-    args_schema: Type[BaseModel] = KBQueryInput
+class SuccessResponse(StandardResponse):
+    """Response model for successful operations."""
+    status: str = "success"
+
+class FailureResponse(StandardResponse):
+    """Response model for failed operations."""
+    status: str = "failure"
+
+# --- Tool Factory Function ---
+
+def get_tools(kb: KnowledgeBase, extractor: Extractor, ingestor: Ingestor, llm: BaseChatModel) -> List[BaseTool]:
+    """Factory function to create and return all available tools with proper dependencies.
     
-    rag_agent: Any
+    This centralizes tool instantiation and ensures consistent dependency injection.
+    Tools are organized by category (search, analysis, visualization, etc.) for better maintainability.
+    
+    Args:
+        kb: The KnowledgeBase instance for database operations
+        extractor: The Extractor instance for text processing and analysis
+        ingestor: The Ingestor instance for loading and processing papers
+        llm: The language model for tools that require text generation or analysis
+        
+    Returns:
+        List[BaseTool]: A list of tool instances ready for use with the agent
+        
+    Note:
+        All tools are configured with proper error handling and return structured responses
+        with success/failure status and consistent data formats.
+    """
+    # Search and retrieval tools
+    search_tools = [
+        DuckDuckGoSearchRun(),
+        ArxivSearchTool(ingestor=ingestor, kb=kb),
+        GetPaperMetadataByTitleTool(kb=kb, llm=llm)
+    ]
+    
+    # Content analysis tools
+    analysis_tools = [
+        # Using the AnswerFromPapersTool that takes kb and llm directly
+        AnswerFromPapersTool(kb=kb, llm=llm),  # This uses the first AnswerFromPapersTool class
+        PaperSummarizationTool(kb=kb, extractor=extractor, llm=llm),
+        KeywordExtractionTool(kb=kb, extractor=extractor, llm=llm),
+        LiteratureGapTool(kb=kb, extractor=extractor, llm=llm),
+        # Temporarily disabled until we have a working Neo4j graph connection
+        # CitationAnalysisTool(graph=graph, paper_id="default_paper_id")
+    ]
+    
+    # Data extraction and processing tools
+    extraction_tools = [
+        TableExtractionTool(kb=kb, extractor=extractor, llm=llm),
+        DataToCsvTool()
+    ]
+    
+    # Visualization tools
+    visualization_tools = [
+        DynamicVisualizationTool(code_writing_llm=llm),
+        PlotGenerationTool(llm=llm)
+    ]
+    
+    # Graph and relationship tools
+    graph_tools = []
+    
+    try:
+        print("\n=== Initializing Graph Tools ===")
+        print("Attempting to import required modules...")
+        
+        from neo4j import GraphDatabase
+        from langchain_neo4j import Neo4jGraph
+        from paper_agent.config import settings
+        
+        print("Modules imported successfully")
+        print(f"Neo4j URI: {settings.NEO4J_URI}")
+        print(f"Neo4j User: {settings.NEO4J_USER}")
+        print(f"Neo4j Database: {settings.NEO4J_DATABASE}")
+        
+        # Initialize Neo4j graph connection using the new package
+        print("\nAttempting to connect to Neo4j using langchain-neo4j...")
+        try:
+            graph = Neo4jGraph(
+                url=settings.NEO4J_URI,
+                username=settings.NEO4J_USER,
+                password=settings.NEO4J_PASSWORD,
+                database=settings.NEO4J_DATABASE or "neo4j"  # Provide default database
+            )
+            
+            print("Successfully connected to Neo4j using langchain-neo4j!")
+            
+            # Test the connection with a simple query
+            try:
+                test_query = "RETURN 1 as test_value"
+                result = graph.query(test_query)
+                print(f"Neo4j test query result: {result}")
+            except Exception as e:
+                print(f"Warning: Neo4j test query failed: {str(e)}")
+        except Exception as e:
+            print(f"Failed to initialize Neo4j connection: {str(e)}")
+            raise
+        
+        # Add graph tools if connection is successful
+        print("\nInitializing graph tools...")
+        graph_tools.extend([
+            GraphQueryTool(graph=graph),
+            RelationshipAnalysisTool(graph=graph, llm=llm),
+            CitationAnalysisTool(graph=graph, paper_id="default_paper_id")
+        ])
+        
+        print("Successfully initialized graph tools:")
+        for tool in graph_tools:
+            print(f"- {tool.name}: {tool.__class__.__name__}")
+        
+    except Exception as e:
+        import traceback
+        print(f"\n❌ Error initializing graph tools:")
+        print(f"Error type: {type(e).__name__}")
+        print(f"Error message: {str(e)}")
+        print("\nStack trace:")
+        traceback.print_exc()
+        print("\nGraph functionality will be disabled. Make sure Neo4j is running and properly configured.")
+    
+    # Combine all tools into a single list
+    all_tools = (
+        search_tools + 
+        analysis_tools + 
+        extraction_tools + 
+        visualization_tools + 
+        graph_tools
+    )
+    
+    # Log the tools being returned
+    print(f"Initialized {len(all_tools)} tools: {[tool.name for tool in all_tools]}")
+    
+    return all_tools
 
-    def _run(self, query: str) -> str:
-        """Use the tool."""
-        return self.rag_agent.run_query(user_query=query)
+# --- Tool Definitions ---
 
-    async def _arun(self, query: str) -> str:
-        """Use the tool asynchronously."""
-        raise NotImplementedError("This tool does not support async yet.")
-
+class AnswerFromPapersInput(BaseModel):
+    """Input model for answering questions from papers."""
+    question: str = Field(description="A detailed, specific question to ask about the content of the papers.")
 
 class ArxivSearchInput(BaseModel):
     """Input model for the ArXiv Search Tool."""
-    query: str = Field(description="The search query to send to the arXiv API.")
-    max_results: int = Field(default=3, description="The maximum number of papers to fetch.")
+    query: str = Field(description="The search query to find papers on arXiv (e.g., 'machine learning').")
+    max_results: int = Field(default=3, description="Maximum number of results to return (default: 3).")
+
+class AnswerFromPapersTool(BaseTool):
+    """Tool to answer questions using the knowledge base of papers."""
+    name: str = "answer_from_papers"
+    description: str = (
+        "**Use this tool FIRST** for any question about scientific topics, papers, or results. "
+        "It performs a semantic search over the existing knowledge base of academic papers to find the answer."
+    )
+    args_schema: Type[BaseModel] = AnswerFromPapersInput
+    
+    kb: KnowledgeBase
+    llm: BaseChatModel
+
+    def _run(self, question: str) -> Dict[str, Any]:
+        """Use the tool to answer a question using the knowledge base."""
+        try:
+            # Perform a semantic search
+            search_results = self.kb.search(query=question, n_results=5)
+            
+            if not search_results or not search_results.get('documents') or not search_results['documents'][0]:
+                return FailureResponse(
+                    message="I could not find any relevant information in the knowledge base to answer that question.",
+                    data={"sources": []}
+                ).dict()
+            
+            # Format the context for the LLM
+            context_str = ""
+            sources = []
+            for i, doc in enumerate(search_results['documents'][0]):
+                meta = search_results['metadatas'][0][i]
+                source = {
+                    "title": meta.get('title', 'Unknown Title'),
+                    "paper_id": meta.get('paper_id', 'N/A'),
+                    "section": meta.get('section', 'N/A')
+                }
+                sources.append(source)
+                
+                context_str += f"--- Context Snippet {i+1} from paper: {source['title']} ---\n"
+                context_str += f"Section: {source['section']}\n"
+                context_str += f"Content: {doc}\n\n"
+            
+            # Generate an answer using the LLM
+            prompt = f"""Answer the user's question based ONLY on the provided context snippets.
+            If the context doesn't contain enough information, say so. Be precise and include 
+            citations like [1], [2], etc. where the number corresponds to the source index.
+            
+            <context>
+            {context_str}
+            </context>
+            
+            Question: {question}
+            
+            Answer:"""
+            
+            response = self.llm.invoke(prompt)
+            answer = response.content if hasattr(response, 'content') else str(response)
+            
+            return SuccessResponse(
+                message="Successfully generated an answer from the knowledge base.",
+                data={
+                    "answer": answer,
+                    "sources": sources
+                }
+            ).dict()
+            
+        except Exception as e:
+            logger.error(f"Error in AnswerFromPapersTool: {e}")
+            return FailureResponse(
+                message=f"An error occurred while processing your question: {str(e)}"
+            ).dict()
+
+    async def _arun(self, question: str) -> str:
+        """Async version of the tool (not implemented)."""
+        raise NotImplementedError("This tool does not support async yet.")
+
+
 
 class ArxivSearchTool(BaseTool):
     """A tool to find and add new papers from arXiv."""
-    name: str = "arxiv_paper_search_and_load_tool"
+    name: str = "arxiv_paper_search_and_load"
     description: str = (
-        "Use this tool ONLY when the user explicitly asks to find, search for, or load NEW papers "
-        "on a specific topic. This adds papers to the knowledge base for later questions."
+        "Use this tool when the user asks to find, search for, or load NEW papers "
+        "from arXiv. This downloads the papers' PDFs and adds them to the knowledge base "
+        "for other tools to use."
     )
     args_schema: Type[BaseModel] = ArxivSearchInput
 
     ingestor: Ingestor
     kb: KnowledgeBase
 
-    def _run(self, query: str, max_results: int = 3) -> str:
-        """Use the tool."""
-        papers = self.ingestor.load_from_arxiv(query=query, max_results=max_results)
-        if not papers:
-            return f"No papers were found on arXiv for the query: '{query}'"
-        
-        self.kb.add_papers(papers)
-        paper_titles = "\n- ".join([str(p.title) for p in papers if p.title])
-        return f"Successfully loaded {len(papers)} papers into the knowledge base:\n- {paper_titles}"
+    def _run(self, query: str, max_results: int = 3) -> Dict[str, Any]:
+        """Search arXiv for papers and add them to the knowledge base."""
+        try:
+            papers = self.ingestor.load_from_arxiv(query=query, max_results=max_results)
+            if not papers:
+                return FailureResponse(
+                    message=f"No papers were found on arXiv for the query: '{query}'",
+                    data={"query": query, "max_results": max_results}
+                ).dict()
+            
+            # Add papers to the knowledge base
+            self.kb.add_papers(papers)
+            
+            # Prepare the response
+            paper_details = [
+                {
+                    "title": str(paper.title),
+                    "authors": paper.authors,
+                    "published": str(paper.published) if hasattr(paper, 'published') else None,
+                    "arxiv_id": paper.entry_id.split('/')[-1] if hasattr(paper, 'entry_id') else None
+                }
+                for paper in papers
+                if hasattr(paper, 'title')
+            ]
+            
+            return SuccessResponse(
+                message=f"Successfully loaded {len(papers)} papers into the knowledge base.",
+                data={
+                    "count": len(papers),
+                    "papers": paper_details,
+                    "query": query
+                }
+            ).dict()
+            
+        except Exception as e:
+            logger.error(f"Error in ArxivSearchTool: {e}")
+            return FailureResponse(
+                message=f"An error occurred while searching arXiv: {str(e)}",
+                data={"query": query, "max_results": max_results}
+            ).dict()
 
-    async def _arun(self, query: str, max_results: int) -> str:
-        """Use the tool asynchronously."""
-        raise NotImplementedError("This tool does not support async yet.")
+    async def _arun(self, query: str, max_results: int) -> Dict[str, Any]:
+        """Async version of the tool (not implemented)."""
+        return self._run(query, max_results)
 
 
 class SummarizationInput(BaseModel):
@@ -190,65 +434,278 @@ class PaperFinderInput(BaseModel):
     """Input model for the paper metadata finder tool."""
     query: str = Field(description="A query to find relevant papers, usually the title of the paper.")
 
+class PaperSearchInput(BaseModel):
+    """Input model for searching papers by title or keywords."""
+    query: str = Field(description="The title or keywords to search for in paper titles.")
+    max_results: int = Field(default=5, description="Maximum number of results to return.")
+
 class GetPaperMetadataByTitleTool(BaseTool):
-    """
-    Use this tool to fetch a paper's metadata (ID, title, authors) from the knowledge graph by title.
-    Only use this to look up paper IDs and metadata.
-    """
+    """Tool to find papers by title or keywords in the knowledge base."""
     name: str = "get_paper_metadata_by_title"
     description: str = (
-        "Use this to find a paper's 'paper_id' and other metadata like authors using its title. "
-        "This is the most reliable way to find a specific paper already in the database."
+        "Use this tool to find papers by their title or keywords. "
+        "Returns metadata including paper_id, title, and authors for matching papers."
     )
-    args_schema: Type[PaperFinderInput] = PaperFinderInput
-    graph: Neo4jGraph
+    args_schema: Type[BaseModel] = PaperSearchInput
+    
+    kb: KnowledgeBase
 
-    def _run(self, query: str) -> str:
-        """Use the tool."""
-        cypher = """
-        MATCH (a:Author)-[:AUTHORED]->(p:Paper)
-        WHERE toLower(p.title) CONTAINS toLower($query)
-        WITH p, collect(a.name) AS authorNames
-        RETURN p.id AS paper_id, p.title AS title, authorNames AS authors
-        LIMIT 5
+    def _run(self, query: str, max_results: int = 5) -> Dict[str, Any]:
+        """Search for papers by title or keywords in the knowledge base."""
+        try:
+            # First try to find matches using vector similarity search
+            search_results = self.kb.collection.query(
+                query_texts=[query],
+                n_results=max_results,
+                include=["metadatas", "documents"]
+            )
+            
+            if not search_results or not search_results.get('metadatas') or not search_results['metadatas'][0]:
+                # Fallback to get all and filter locally if vector search returns nothing
+                all_papers = self.kb.collection.get(
+                    limit=100,  # Limit to prevent memory issues
+                    include=["metadatas", "documents"]
+                )
+                
+                if not all_papers or not all_papers.get('metadatas'):
+                    return FailureResponse(
+                        message=f"No papers found in the knowledge base.",
+                        data={"query": query, "max_results": max_results}
+                    ).dict()
+                
+                # Filter papers locally by checking if query is in title (case-insensitive)
+                query_lower = query.lower()
+                matching_metadatas = []
+                
+                for meta in all_papers['metadatas']:
+                    if not meta or 'title' not in meta:
+                        continue
+                    title = str(meta['title']).lower()
+                    if query_lower in title:
+                        matching_metadatas.append(meta)
+                    
+                    if len(matching_metadatas) >= max_results:
+                        break
+                
+                if not matching_metadatas:
+                    return FailureResponse(
+                        message=f"No papers found matching the query: '{query}'",
+                        data={"query": query, "max_results": max_results}
+                    ).dict()
+                
+                results = {'metadatas': [matching_metadatas]}
+            else:
+                results = search_results
+            
+            # Process results to get unique papers by paper_id
+            unique_papers = {}
+            for meta in results['metadatas'][0]:
+                if not meta or 'paper_id' not in meta or not meta['paper_id']:
+                    continue
+                
+                paper_id = meta['paper_id']
+                if paper_id not in unique_papers:
+                    unique_papers[paper_id] = {
+                        "paper_id": paper_id,
+                        "title": meta.get('title', 'Untitled'),
+                        "authors": meta.get('authors', []),
+                        "year": meta.get('year'),
+                        "doi": meta.get('doi')
+                    }
+                
+                if len(unique_papers) >= max_results:
+                    break
+        
+            papers = list(unique_papers.values())
+            
+            return SuccessResponse(
+                message=f"Found {len(papers)} matching papers.",
+                data={
+                    "count": len(papers),
+                    "papers": papers,
+                    "query": query
+                }
+            ).dict()
+            
+        except Exception as e:
+            logger.error(f"Error in GetPaperMetadataByTitleTool: {e}")
+            return FailureResponse(
+                message=f"An error occurred while searching for papers: {str(e)}",
+                data={"query": query, "max_results": max_results}
+            ).dict()
+
+    async def _arun(self, query: str, max_results: int = 5) -> Dict[str, Any]:
+        """Async version of the tool."""
+        return self._run(query, max_results)
+
+
+class PaperSummarizationInput(BaseModel):
+    """Input model for paper summarization.
+    
+    Either paper_id OR title must be provided. If both are provided, paper_id takes precedence.
+    """
+    paper_id: Optional[str] = Field(
+        default=None,
+        description="The unique ID of the paper to summarize. If not provided, title will be used for lookup."
+    )
+    title: Optional[str] = Field(
+        default=None,
+        description="Title of the paper to summarize. Only used if paper_id is not provided."
+    )
+    summary_length: str = Field(
+        default="concise", 
+        description="Desired length of the summary. Options: 'brief' (1-2 sentences), 'concise' (1 paragraph), or 'detailed' (multiple paragraphs)."
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "paper_id": "1706.03762",
+                "title": "Attention Is All You Need",
+                "summary_length": "concise"
+            }
+        }
+
+class PaperSummarizationTool(BaseTool):
+    """Tool to generate summaries of scientific papers."""
+    name: str = "summarize_paper"
+    description: str = (
+        "Use this tool to generate a summary of a specific scientific paper. "
+        "You must provide the paper_id of the paper to summarize."
+    )
+    args_schema: Type[BaseModel] = PaperSummarizationInput
+    
+    kb: KnowledgeBase
+    extractor: Extractor
+
+    def _get_paper_by_id(self, paper_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a paper from the knowledge base by its ID."""
+        results = self.kb.collection.get(
+            where={"paper_id": paper_id},
+            include=['documents', 'metadatas']
+        )
+        if not results or 'documents' not in results or not results['documents']:
+            return None
+        return results
+    
+    def _search_paper_by_title(self, title: str) -> Optional[Dict[str, Any]]:
+        """Search for a paper in the knowledge base by its title."""
+        # First try exact match
+        results = self.kb.collection.query(
+            query_texts=[title],
+            n_results=1,
+            where={"title": {"$eq": title}},
+            include=['documents', 'metadatas']
+        )
+        
+        # If no exact match, try semantic search
+        if not results or not results.get('documents') or not results['documents'][0]:
+            results = self.kb.collection.query(
+                query_texts=[title],
+                n_results=1,
+                include=['documents', 'metadatas']
+            )
+        
+        if not results or not results.get('documents') or not results['documents'][0]:
+            return None
+            
+        # Reformat to match the structure of _get_paper_by_id
+        return {
+            'documents': results['documents'][0],
+            'metadatas': results.get('metadatas', [[]])[0] if results.get('metadatas') else []
+        }
+    
+    def _run(self, paper_id: Optional[str] = None, title: Optional[str] = None, summary_length: str = "concise") -> Dict[str, Any]:
+        """Generate a summary of the specified paper.
+        
+        Args:
+            paper_id: The unique ID of the paper to summarize (takes precedence if both are provided)
+            title: Title of the paper to summarize (used if paper_id is not provided)
+            summary_length: Desired length of the summary ('brief', 'concise', or 'detailed')
+            
+        Returns:
+            Dict containing the summary and metadata, or an error message
         """
         try:
-            result = self.graph.query(cypher, params={"query": query})
-            if not result:
-                return json.dumps({"status": "failure", "reason": f"No paper found with title containing '{query}'."})
-            return json.dumps({"status": "success", "data": result})
+            # Validate inputs
+            if not paper_id and not title:
+                return FailureResponse(
+                    message="Either 'paper_id' or 'title' must be provided.",
+                    data={"summary_length": summary_length}
+                ).dict()
+                
+            # Validate summary length
+            if summary_length not in ["brief", "concise", "detailed"]:
+                summary_length = "concise"  # Default to concise if invalid
+            
+            # Try to get the paper by ID first
+            results = None
+            paper_source = None
+            
+            if paper_id:
+                results = self._get_paper_by_id(paper_id)
+                paper_source = f"ID: {paper_id}"
+            
+            # If not found by ID, try searching by title
+            if not results and title:
+                results = self._search_paper_by_title(title)
+                paper_source = f"title: {title}"
+            
+            if not results:
+                return FailureResponse(
+                    message=f"Could not find paper with {paper_source} in the knowledge base.",
+                    data={"paper_id": paper_id, "title": title} if paper_id else {"title": title}
+                ).dict()
+            
+            # Combine all document chunks
+            full_text = "\n\n".join(doc for doc in results['documents'] if doc)
+            
+            # Get metadata
+            metadata = results['metadatas'][0] if results.get('metadatas') and results['metadatas'] else {}
+            title = metadata.get('title', title or 'Unknown Title')
+            paper_id = metadata.get('paper_id', paper_id or 'unknown')
+            
+            # Generate summary - the extractor will handle the summary length based on the prompt
+            summary = self.extractor.summarize_paper_text(
+                paper_text=full_text,
+                paper_title=title
+            )
+            
+            return SuccessResponse(
+                message=f"Successfully generated a {summary_length} summary for '{title}'",
+                data={
+                    "paper_id": paper_id,
+                    "title": title,
+                    "summary": summary,
+                    "summary_length": summary_length
+                }
+            ).dict()
+            
         except Exception as e:
-            return f"Error executing graph query: {e}"
+            logger.error(f"Error in PaperSummarizationTool: {e}")
+            return FailureResponse(
+                message=f"An error occurred while generating the summary: {str(e)}",
+                data={"paper_id": paper_id, "summary_length": summary_length}
+            ).dict()
+
+    async def _arun(self, paper_id: Optional[str] = None, title: Optional[str] = None, summary_length: str = "concise") -> Dict[str, Any]:
+        """Async version of the tool."""
+        return self._run(paper_id=paper_id, title=title, summary_length=summary_length)
 
 class QuestionAnsweringInput(BaseModel):
     """Input model for the Question Answering Tool."""
     question: str = Field(description="A detailed, specific question to ask about the content of the papers.")
-
-class AnswerFromPapersTool(BaseTool):
-    """
-    Use this tool to answer questions about the content of papers in the knowledge base. This is the main RAG-based question answering tool.
-    """
-    name: str = "answer_from_papers"
-    description: str = (
-        "Use this tool to answer questions about the content of papers in the knowledge base. "
-        "This is the main RAG-based question answering tool."
-    )
-    args_schema: Type[QuestionAnsweringInput] = QuestionAnsweringInput
-    rag_agent: Any # This will be our TempRAGAgent
-
-    def _run(self, question: str) -> str:
-        """Use the tool."""
-        return self.rag_agent.run_query(user_query=question)
-
-    async def _arun(self, question: str) -> str:
-        raise NotImplementedError("This tool does not support async yet.")
 
 class GraphQueryInput(BaseModel):
     """Input model for the Graph Query Tool."""
     query: str = Field(description="A Cypher query to run against the Neo4j graph database.")
 
 class GraphQueryTool(BaseTool):
-    """Answers questions about relationships between papers and authors by querying the knowledge graph."""
+    """Answers questions about relationships between papers and authors by querying the knowledge graph.
+    
+    This tool executes Cypher queries against a Neo4j graph database containing paper and author relationships.
+    It's particularly useful for finding connections, collaborations, and citation patterns in academic literature.
+    """
     name: str = "graph_query_tool"
     description: str = (
         "**This is the best tool for answering questions about authors, collaborations, or connections between papers.** "
@@ -256,36 +713,82 @@ class GraphQueryTool(BaseTool):
         "Input must be a valid Cypher query."
     )
     args_schema: Type[GraphQueryInput] = GraphQueryInput
-
+    
     graph: Neo4jGraph
+    max_results: int = 50  # Limit number of results to prevent overwhelming output
 
-    def _run(self, query: str) -> str:
-        """Use the tool."""
+    def _run(self, query: str) -> Dict[str, Any]:
+        """Execute a Cypher query against the knowledge graph.
+        
+        Args:
+            query: A valid Cypher query string
+            
+        Returns:
+            Dict containing query results or error information
+        """
         print(f"Running Cypher query: {query}")
         try:
+            # Execute the query
             result = self.graph.query(query)
             
-
             if not result:
-                return "No results found in the graph for that query."
+                return SuccessResponse(
+                    message="Query executed successfully but returned no results.",
+                    data={"result_count": 0}
+                )
             
-            values = [list(record.values())[0] for record in result if record]
+            # Process results - limit number of results to avoid huge responses
+            values = [list(record.values())[0] for record in result[:self.max_results] if record]
             
             if not values:
-                 return "The query ran, but returned no data."
-
-            return f"The following items were found in the knowledge graph: {', '.join(map(str, values))}"
-
+                return SuccessResponse(
+                    message="Query executed but did not return any values.",
+                    data={"result_count": 0}
+                )
+            
+            # For large result sets, just return a summary
+            if len(result) > self.max_results:
+                return SuccessResponse(
+                    message=f"Query returned {len(result)} results, showing first {self.max_results}.",
+                    data={
+                        "result_count": len(result),
+                        "results": values,
+                        "truncated": True,
+                        "max_results": self.max_results
+                    }
+                )
+                
+            return SuccessResponse(
+                message=f"Query returned {len(values)} results.",
+                data={
+                    "result_count": len(values),
+                    "results": values,
+                    "truncated": False
+                }
+            )
+            
         except Exception as e:
-            return f"Error executing Cypher query: {e}"
+            return FailureResponse(
+                message=f"Error executing Cypher query: {str(e)}",
+                data={
+                    "error_type": type(e).__name__,
+                    "query": query[:200] + ("..." if len(query) > 200 else "")  # Include part of query for debugging
+                }
+            )
 
     def __init__(self, **kwargs: Any):
         super().__init__(**kwargs)
-        schema = self.graph.get_schema
-        if callable(schema):
-            schema = schema()
-        escaped_schema = schema.replace("{", "{{").replace("}", "}}")
-        self.description += f"\nGraph Schema:\n{escaped_schema}"
+        # Include schema in the tool description for LLM reference
+        try:
+            schema = self.graph.get_schema
+            if callable(schema):
+                schema = schema()
+            # Escape curly braces to prevent formatting issues
+            escaped_schema = schema.replace("{", "{{").replace("}", "}}")
+            self.description += f"\n\n**Graph Schema:**\n```\n{escaped_schema}\n```"
+        except Exception as e:
+            print(f"Warning: Could not load graph schema: {e}")
+            self.description += "\n\n**Warning:** Could not load graph schema."
 
     async def _arun(self, query: str) -> str:
         raise NotImplementedError("This tool does not support async yet.")
@@ -304,193 +807,518 @@ class TableExtractionTool(BaseTool):
     kb: KnowledgeBase
     extractor: Extractor
 
-    def _run(self, paper_id: str, topic_of_interest: str) -> str:
-        results = self.kb.collection.get(where={"paper_id": paper_id})
-        if not results or not results['documents']:
-            response = {"status": "failure", "reason": f"Could not find paper with ID '{paper_id}' in the knowledge base."}
-            return json.dumps(response)
-        import shutil, os
-        pdf_filename = None
+    def _run(self, paper_id: str, topic_of_interest: str) -> Dict[str, Any]:
         try:
-            if os.path.exists(paper_id) and paper_id.endswith('.pdf'):
-                pdf_filename = os.path.basename(paper_id)
-            elif paper_id.startswith('http') and 'arxiv.org' in paper_id:
-                arxiv_id = paper_id.split('/')[-1].split('v')[0]
-                for fname in os.listdir('.'):
-                    if fname.startswith(arxiv_id) and fname.endswith('.pdf'):
-                        pdf_filename = fname
-                        break
-                if not pdf_filename:
-                    try:
-                        import arxiv
-                        result = next(arxiv.Search(id_list=[arxiv_id]).results())
-                        pdf_path = result.download_pdf()
-                        pdf_filename = os.path.basename(pdf_path)
-                        print(f"Downloaded missing PDF for artifacts: {pdf_filename}")
-                    except Exception as e:
-                        print(f"Failed to download missing PDF for artifacts: {e}")
-            if pdf_filename:
-                artifacts_dir = 'artifacts'
-                dest_path = os.path.join(artifacts_dir, pdf_filename)
-                try:
-                    if not os.path.exists(artifacts_dir):
-                        os.makedirs(artifacts_dir)
-                    if not os.path.exists(dest_path) and os.path.exists(pdf_filename):
-                        shutil.copy(pdf_filename, dest_path)
-                        print(f"Copied referenced PDF to artifacts: {dest_path}")
-                except Exception as e:
-                    print(f"Failed to copy referenced PDF to artifacts: {e}")
-        except Exception as e:
-            print(f"PDF artifact logic error: {e}")
-        full_text = " ".join(results['documents'])
-        metadatas = results.get('metadatas')
-        if metadatas and len(metadatas) > 0:
-            raw_title = metadatas[0].get('title', 'Unknown Title')
-            title = str(raw_title) if raw_title is not None else 'Unknown Title'
-        else:
-            title = 'Unknown Title'
-        json_table_str = self.extractor.extract_table_as_json(full_text, title, topic_of_interest)
-
-        try:
-            if "```json" in json_table_str:
-                json_table_str = json_table_str.split("```json")[1].split("```" ).strip()
+            # Get paper from knowledge base
+            results = self.kb.collection.get(where={"paper_id": paper_id})
+            if not results or not results.get('documents'):
+                return FailureResponse(
+                    message=f"Could not find paper with ID '{paper_id}' in the knowledge base.",
+                    data={"paper_id": paper_id}
+                )
             
-            parsed_data = json.loads(json_table_str)
-            if isinstance(parsed_data, dict) and "columns" in parsed_data and "data" in parsed_data and parsed_data["data"]:
-                response = {"status": "success", "data": parsed_data}
-                return json.dumps(response)
-            else:
-                print("LLM-based table extraction failed or returned no data. Trying Camelot PDF extraction as fallback...")
-        except (json.JSONDecodeError, TypeError):
-            print("LLM-based table extraction failed (invalid JSON). Trying Camelot PDF extraction as fallback...")
-
-        try:
-            import camelot
-            pdf_path = None
-            if pdf_filename and os.path.exists(pdf_filename):
-                pdf_path = pdf_filename
-            elif os.path.exists(paper_id) and paper_id.endswith('.pdf'):
-                pdf_path = paper_id
-            if pdf_path:
-                tables = camelot.read_pdf(pdf_path, pages='all')
-                if tables and len(tables) > 0:
-                    df = tables[0].df
-                    columns = list(df.iloc[0])
-                    data = df.iloc[1:].values.tolist()
-                    response = {"status": "success", "data": {"columns": columns, "data": data}}
-                    return json.dumps(response)
-                else:
-                    print("Camelot found no tables in the PDF.")
-            else:
-                print("No PDF file found for Camelot extraction.")
-        except Exception as camelot_exc:
-            print(f"Camelot extraction failed: {camelot_exc}")
-
-        response = {"status": "failure", "reason": "No relevant table matching the topic was found, and PDF table extraction also failed."}
-        return json.dumps(response)
+            # Get paper metadata
+            full_text = " ".join(results['documents'])
+            metadatas = results.get('metadatas', [{}])
+            title = str(metadatas[0].get('title', 'Unknown Title'))
+            
+            # Try LLM-based extraction first
+            try:
+                json_table_str = self.extractor.extract_table_as_json(full_text, title, topic_of_interest)
+                
+                # Clean and parse the response
+                if "```json" in json_table_str:
+                    json_table_str = json_table_str.split("```json")[1].split("```")[0].strip()
+                
+                parsed_data = json.loads(json_table_str)
+                if isinstance(parsed_data, dict) and "columns" in parsed_data and "data" in parsed_data:
+                    return SuccessResponse(
+                        message=f"Successfully extracted table about '{topic_of_interest}' from paper: {title}",
+                        data=parsed_data
+                    )
+                
+            except Exception as e:
+                print(f"LLM-based table extraction failed: {e}")
+            
+            # Fall back to PDF extraction if available
+            try:
+                import camelot
+                pdf_path = self._find_pdf_path(paper_id)
+                if pdf_path and os.path.exists(pdf_path):
+                    tables = camelot.read_pdf(pdf_path, pages='all')
+                    if tables and len(tables) > 0:
+                        df = tables[0].df
+                        table_data = {
+                            "columns": list(df.iloc[0]),
+                            "data": df.iloc[1:].values.tolist()
+                        }
+                        return SuccessResponse(
+                            message=f"Extracted table from PDF using Camelot: {title}",
+                            data=table_data
+                        )
+            except Exception as e:
+                print(f"PDF extraction failed: {e}")
+            
+            return FailureResponse(
+                message=f"Could not extract table about '{topic_of_interest}' from paper: {title}",
+                data={"paper_id": paper_id, "title": title}
+            )
+            
+        except Exception as e:
+            return FailureResponse(
+                message=f"Error extracting table: {str(e)}",
+                data={"paper_id": paper_id, "error_type": type(e).__name__}
+            )
+    
+    def _find_pdf_path(self, paper_id: str) -> Optional[str]:
+        """Helper to find PDF path from paper ID."""
+        import os
+        
+        if os.path.exists(paper_id) and paper_id.endswith('.pdf'):
+            return paper_id
+            
+        if paper_id.startswith('http') and 'arxiv.org' in paper_id:
+            arxiv_id = paper_id.split('/')[-1].split('v')[0]
+            for fname in os.listdir('.'):
+                if fname.startswith(arxiv_id) and fname.endswith('.pdf'):
+                    return fname
+        return None
 
 class RelationshipInput(BaseModel):
     paper_a_title: str = Field(description="The title of the first paper.")
     paper_b_title: str = Field(description="The title of the second paper.")
 
 class RelationshipAnalysisTool(BaseTool):
+    """Tool for analyzing and explaining relationships between two papers in the knowledge graph.
+    
+    This tool finds and explains connections, citations, and other relationships between
+    academic papers by querying the knowledge graph and generating natural language explanations.
+    """
     name: str = "relationship_analysis_tool"
     description: str = (
-        "Use this tool to explain the relationship between two papers. "
-        "It queries the knowledge graph to find citation paths and other connections."
-    )
+            "Use this tool to explain the relationship between two papers. "
+            "It queries the knowledge graph to find citation paths and other connections. "
+            "Provide the titles of the two papers to analyze."
+        )
     args_schema: Type[RelationshipInput] = RelationshipInput
     graph: Neo4jGraph
-    llm: Any  # Accept any LLM with an .invoke method
+    llm: BaseChatModel
+    max_path_length: int = 5  # Maximum path length to search for relationships
 
-    def _run(self, paper_a_title: str, paper_b_title: str) -> str:
-        cypher_query = f"""
-        MATCH (p1:Paper), (p2:Paper), path = shortestPath((p1)-[:CITES*]-(p2))
-        WHERE toLower(p1.title) CONTAINS toLower('{paper_a_title}')
-        AND toLower(p2.title) CONTAINS toLower('{paper_b_title}')
-        RETURN path
+    def _run(self, paper_a_title: str, paper_b_title: str) -> Dict[str, Any]:
+        """Analyze the relationship between two papers.
+        
+        Args:
+            paper_a_title: Title or partial title of the first paper
+            paper_b_title: Title or partial title of the second paper
+            
+        Returns:
+            Dict containing the analysis results or error information
         """
-        print(f"Running relationship query: {cypher_query}")
-        graph_data = str(self.graph.query(cypher_query))
-
-        if not graph_data or graph_data == '[]':
-            return "No direct citation path found between the two papers in the knowledge graph."
-
-        synthesis_prompt = f"""
-        A user wants to know the relationship between '{paper_a_title}' and '{paper_b_title}'.
-        A knowledge graph query returned the following connection path:
-        ---
-        {graph_data}
-        ---
-        Based on this data, please explain the relationship in a clear, concise paragraph. For example, you might say 'Paper B cites Paper A' or 'Paper A and Paper B both cite a common paper C'.
-        """
-        response = self.llm.invoke(synthesis_prompt)
-        return response.content
+        try:
+            # First, find the paper nodes
+            query = """
+            MATCH (a:Paper), (b:Paper)
+            WHERE toLower(a.title) CONTAINS toLower($title_a) AND toLower(b.title) CONTAINS toLower($title_b)
+            RETURN a, b
+            LIMIT 1
+            """
+            result = self.graph.query(query, params={"title_a": paper_a_title, "title_b": paper_b_title})
+            
+            if not result or len(result) == 0:
+                return FailureResponse(
+                    message="Could not find one or both papers in the knowledge graph.",
+                    data={"paper_a_query": paper_a_title, "paper_b_query": paper_b_title}
+                )
+                
+            paper_a = result[0]['a']
+            paper_b = result[0]['b']
+            
+            # Find the shortest path between them
+            path_query = f"""
+            MATCH path = shortestPath((a:Paper)-[*..{self.max_path_length}]-(b:Paper))
+            WHERE a.title = $title_a AND b.title = $title_b
+            RETURN path
+            """
+            path_result = self.graph.query(path_query, params={"title_a": paper_a['title'], "title_b": paper_b['title']})
+            
+            if not path_result or len(path_result) == 0:
+                return SuccessResponse(
+                    message=f"No direct relationship found between the papers.",
+                    data={
+                        "paper_a": paper_a['title'],
+                        "paper_b": paper_b['title'],
+                        "relationship_found": False
+                    }
+                )
+            
+            # Format the path for display and analysis
+            path = path_result[0]['path']
+            path_description = self._format_path(path)
+            
+            # Generate a natural language explanation
+            explanation = self._generate_explanation(paper_a, paper_b, path_description)
+            
+            return SuccessResponse(
+                message="Relationship analysis completed successfully.",
+                data={
+                    "paper_a": paper_a['title'],
+                    "paper_b": paper_b['title'],
+                    "relationship_found": True,
+                    "path_length": len(path) - 1,  # Number of edges
+                    "path_description": path_description,
+                    "explanation": explanation
+                }
+            )
+            
+        except Exception as e:
+            return FailureResponse(
+                message=f"Error analyzing relationship: {str(e)}",
+                data={
+                    "error_type": type(e).__name__,
+                    "paper_a_query": paper_a_title,
+                    "paper_b_query": paper_b_title
+                }
+            )
 
 class CitationAnalysisInput(BaseModel):
     analysis_type: str = Field(description="The type of citation analysis to perform. Options: 'most_cited', 'hottest_papers'.")
     limit: int = Field(default=5, description="The number of papers to return.")
 
 class CitationAnalysisTool(BaseTool):
-    """
-    Performs citation analysis on the knowledge graph. Can find the most cited papers
-    or the papers with the most outgoing citations ('hottest papers' or foundational work).
+    """Performs citation analysis on the knowledge graph. 
+    
+    This tool can identify:
+    - Most cited papers (highest incoming citations)
+    - Most connected papers (most outgoing references)
+    - Foundational papers (highly cited and highly connected)
+    
+    Results are returned in a structured format with detailed metadata.
     """
     name: str = "citation_analysis_tool"
     description: str = (
         "Use this to find influential papers. 'most_cited' finds papers that many others reference. "
-        "'hottest_papers' finds papers that reference many others."
+        "'hottest_papers' finds papers that reference many others (indicating broad literature review). "
+        "'foundational' finds papers that are both highly cited and reference many other works."
     )
     args_schema: Type[CitationAnalysisInput] = CitationAnalysisInput
     graph: Neo4jGraph
+    max_results: int = 10  # Default max results
 
-    def _run(self, analysis_type: str, limit: int = 5) -> str:
-        if analysis_type == 'most_cited':
-            query = f"""
-            MATCH (p:Paper)<-[r:CITES]-()
-            RETURN p.title AS paper, count(r) AS citations
-            ORDER BY citations DESC
-            LIMIT {limit}
-            """
-        elif analysis_type == 'hottest_papers':
-            query = f"""
-            MATCH (p:Paper)-[r:CITES]->()
-            RETURN p.title AS paper, count(r) AS citations_made
-            ORDER BY citations_made DESC
-            LIMIT {limit}
-            """
-        else:
-            return "Error: Invalid analysis_type. Must be 'most_cited' or 'hottest_papers'."
-
-        print(f"Running citation analysis query: {analysis_type}")
+    def _run(self, analysis_type: str, limit: int = 5) -> Dict[str, Any]:
+        """Perform citation analysis on the knowledge graph.
+        
+        Args:
+            analysis_type: Type of analysis to perform ('most_cited', 'hottest_papers', 'foundational')
+            limit: Maximum number of results to return (capped at max_results)
+            
+        Returns:
+            Dict containing analysis results or error information
+        """
+        # Validate input
+        limit = min(max(1, limit), self.max_results)  # Ensure limit is reasonable
+        
         try:
-            result = self.graph.query(query)
-            if not result:
-                return "No citation data found in the graph to perform analysis."
-            return str(result)
+            if analysis_type == "most_cited":
+                return self._find_most_cited(limit)
+            elif analysis_type == "hottest_papers":
+                return self._find_hottest_papers(limit)
+            elif analysis_type == "foundational":
+                return self._find_foundational_papers(limit)
+            else:
+                return FailureResponse(
+                    message=f"Unknown analysis type: {analysis_type}",
+                    data={
+                        "valid_types": ["most_cited", "hottest_papers", "foundational"],
+                        "provided_type": analysis_type
+                    }
+                )
+                
         except Exception as e:
-            return f"Error during citation analysis: {e}"
+            return FailureResponse(
+                message=f"Error performing citation analysis: {str(e)}",
+                data={
+                    "error_type": type(e).__name__,
+                    "analysis_type": analysis_type,
+                    "limit": limit
+                }
+            )
+            
+    def _find_most_cited(self, limit: int) -> Dict[str, Any]:
+        """Find the most cited papers in the knowledge graph."""
+        query = """
+        MATCH (p:Paper)<-[:CITES]-(cited_by)
+        WITH p, count(cited_by) AS citation_count
+        RETURN p.title AS title, 
+               p.year AS year,
+               p.authors AS authors,
+               citation_count
+        ORDER BY citation_count DESC
+        LIMIT $limit
+        """
+        result = self.graph.query(query, params={"limit": limit})
+        
+        if not result:
+            return SuccessResponse(
+                message="No citation data found in the knowledge graph.",
+                data={"result_count": 0}
+            )
+            
+        return SuccessResponse(
+            message=f"Found {len(result)} most cited papers.",
+            data={
+                "analysis_type": "most_cited",
+                "papers": [dict(paper) for paper in result],
+                "result_count": len(result)
+            }
+        )
+        
+    def _find_hottest_papers(self, limit: int) -> Dict[str, Any]:
+        """Find papers with the most outgoing references."""
+        query = """
+        MATCH (p:Paper)-[:CITES]->(cited)
+        WITH p, count(cited) AS reference_count
+        RETURN p.title AS title,
+               p.year AS year,
+               p.authors AS authors,
+               reference_count
+        ORDER BY reference_count DESC
+        LIMIT $limit
+        """
+        result = self.graph.query(query, params={"limit": limit})
+        
+        if not result:
+            return SuccessResponse(
+                message="No reference data found in the knowledge graph.",
+                data={"result_count": 0}
+            )
+            
+        return SuccessResponse(
+            message=f"Found {len(result)} papers with the most references.",
+            data={
+                "analysis_type": "hottest_papers",
+                "papers": [dict(paper) for paper in result],
+                "result_count": len(result)
+            }
+        )
+        
+    def _find_foundational_papers(self, limit: int) -> Dict[str, Any]:
+        """Find papers that are both highly cited and reference many other works."""
+        query = """
+        MATCH (p:Paper)
+        OPTIONAL MATCH (p)<-[:CITES]-(cited_by)
+        WITH p, count(DISTINCT cited_by) AS citation_count
+        OPTIONAL MATCH (p)-[:CITES]->(ref)
+        WITH p, citation_count, count(DISTINCT ref) AS reference_count,
+             (citation_count * 1.0) / NULLIF((citation_count + reference_count), 0) AS citation_ratio
+        WHERE citation_count > 0 AND reference_count > 0
+        RETURN p.title AS title,
+               p.year AS year,
+               p.authors AS authors,
+               citation_count,
+               reference_count,
+               citation_ratio
+        ORDER BY citation_ratio DESC, citation_count DESC
+        LIMIT $limit
+        """
+        result = self.graph.query(query, params={"limit": limit})
+        
+        if not result:
+            return SuccessResponse(
+                message="No foundational papers found with both incoming and outgoing citations.",
+                data={"result_count": 0}
+            )
+            
+        return SuccessResponse(
+            message=f"Found {len(result)} foundational papers (highly cited with many references).",
+            data={
+                "analysis_type": "foundational",
+                "papers": [dict(paper) for paper in result],
+                "result_count": len(result)
+            }
+        )
 
-class KeywordExtractionInput(BaseModel):
     paper_id: str = Field(description="The ID of the paper from which to extract keywords.")
     num_keywords: int = Field(default=10, description="The number of keywords to extract.")
 
-class KeywordExtractionTool(BaseTool):
-    """Extracts the most important keywords or concepts from a given paper."""
-    name: str = "keyword_extraction_tool"
-    description: str = "Use this to identify the main topics, concepts, or keywords of a specific paper."
-    args_schema: Type[KeywordExtractionInput] = KeywordExtractionInput
-    kb: KnowledgeBase
-    extractor: Extractor # Uses an LLM to find the keywords
+class KeywordExtractionInput(BaseModel):
+    """Input model for the Keyword Extraction Tool."""
+    paper_id: str = Field(description="The ID of the paper to analyze.")
+    num_keywords: int = Field(default=10, description="Number of keywords to extract (default: 10).")
 
-    def _run(self, paper_id: str, num_keywords: int = 10) -> str:
-        results = self.kb.collection.get(where={"paper_id": paper_id})
-        if not results or not results['documents']:
-            return f"Error: Could not find paper with ID {paper_id}."
+
+class LiteratureGapInput(BaseModel):
+    """Input model for the Literature Gap Analysis Tool."""
+    paper_ids: List[str] = Field(description="List of paper IDs to analyze for gaps.")
+    query: Optional[str] = Field(
+        default=None, 
+        description="Optional query to focus the gap analysis (e.g., 'machine learning in healthcare')."
+    )
+
+
+class LiteratureGapTool(BaseTool):
+    """Identifies potential gaps or limitations in the existing literature.
+    
+    This tool analyzes a set of papers to find areas that are underexplored, 
+    contradictory findings, or opportunities for future research. It's particularly 
+    useful for identifying novel research directions or areas needing further investigation.
+    """
+    name: str = "literature_gap_analysis"
+    description: str = (
+        "Use this to identify gaps, contradictions, or underexplored areas in the literature. "
+        "Provide a list of paper_ids and an optional query to focus the analysis."
+    )
+    args_schema: Type[BaseModel] = LiteratureGapInput
+    
+    kb: KnowledgeBase
+    extractor: Extractor
+    max_keywords: int = 50  # Safety limit to prevent excessive processing
+
+class KeywordExtractionTool(BaseTool):
+    """Extracts the most important keywords or concepts from a given paper.
+    
+    This tool analyzes the content of a paper and identifies the most significant
+    terms and concepts using statistical analysis of term frequency and other
+    linguistic features. It's useful for quickly understanding the main topics
+    and focus areas of a research paper.
+    """
+    name: str = "keyword_extraction_tool"
+    description: str = (
+        "Use this to identify the main topics, concepts, or keywords of a specific paper. "
+        "Provide the paper_id and optionally the number of keywords to extract (default: 10)."
+    )
+    args_schema: Type[BaseModel] = KeywordExtractionInput
+    
+    kb: KnowledgeBase
+    extractor: Extractor
+    max_keywords: int = 50  # Safety limit to prevent excessive processing
+
+    def _run(self, paper_id: str, num_keywords: int = 10) -> Dict[str, Any]:
+        """Extract keywords from a paper.
         
-        full_text = " ".join(results['documents'])
-        keywords = self.extractor.extract_keywords(full_text, num_keywords)
-        return f"The key concepts are: {', '.join(keywords)}"
+        Args:
+            paper_id: The ID of the paper to analyze
+            num_keywords: Number of keywords to extract (capped at max_keywords)
+            
+        Returns:
+            Dict containing the extracted keywords and metadata
+        """
+        # Validate input
+        num_keywords = min(max(1, num_keywords), self.max_keywords)
+        
+        try:
+            # Get the paper content from the knowledge base
+            results = self.kb.collection.get(
+                where={"paper_id": paper_id}, 
+                include=["documents", "metadatas"]
+            )
+            
+            if not results or not results.get('documents'):
+                return FailureResponse(
+                    message=f"Could not find paper with ID '{paper_id}' in the knowledge base.",
+                    data={"paper_id": paper_id, "available_papers": self._get_available_papers()}
+                )
+            
+            # Combine all text chunks for the paper
+            paper_text = "\n\n".join(results['documents'])
+            if not paper_text.strip():
+                return FailureResponse(
+                    message=f"Paper with ID '{paper_id}' has no text content to analyze.",
+                    data={"paper_id": paper_id}
+                )
+            
+            # Extract keywords using the extractor
+            try:
+                keywords = self.extractor.extract_keywords(paper_text, num_keywords=num_keywords)
+                
+                # Convert keywords to a consistent format (list of strings)
+                if isinstance(keywords, list):
+                    if all(isinstance(kw, (list, tuple)) and len(kw) >= 2 for kw in keywords):
+                        # Handle case where keywords are returned as list of (keyword, score) tuples
+                        keyword_list = [kw[0] for kw in keywords]
+                        scores = [float(kw[1]) for kw in keywords]
+                    else:
+                        # Handle case where keywords are returned as flat list of strings
+                        keyword_list = [str(kw) for kw in keywords]
+                        scores = [1.0] * len(keyword_list)  # Default score of 1.0 if not provided
+                else:
+                    # Handle case where keywords is not a list
+                    keyword_list = [str(keywords)] if keywords else []
+                    scores = [1.0] * len(keyword_list)
+                    
+                # Prepare the result with consistent format
+                paper_metadata = results['metadatas'][0] if results.get('metadatas') else {}
+                result_data = {
+                    "paper_id": paper_id,
+                    "title": paper_metadata.get('title', 'Unknown'),
+                    "authors": paper_metadata.get('authors', []),
+                    "year": paper_metadata.get('year'),
+                    "num_keywords_found": len(keyword_list),
+                    "keywords": []
+                }
+                
+                # Add keywords with scores if available
+                if scores and len(scores) == len(keyword_list):
+                    min_score = min(scores) if scores else 0
+                    max_score = max(scores) if scores else 1.0
+                    score_range = max_score - min_score if max_score > min_score else 1.0
+                    
+                    for kw, score in zip(keyword_list, scores):
+                        normalized_score = (float(score) - min_score) / score_range if score_range > 0 else 1.0
+                        result_data["keywords"].append({
+                            "keyword": kw,
+                            "score": float(score),
+                            "normalized_score": normalized_score
+                        })
+                else:
+                    # If no scores, just add keywords with default score of 1.0
+                    result_data["keywords"] = [{"keyword": kw, "score": 1.0, "normalized_score": 1.0} 
+                                             for kw in keyword_list]
+                
+            except Exception as e:
+                return FailureResponse(
+                    message=f"Error during keyword extraction: {str(e)}",
+                    data={
+                        "error_type": type(e).__name__,
+                        "paper_id": paper_id,
+                        "text_length": len(paper_text),
+                        "error_details": str(e)
+                    }
+                )
+            
+            return SuccessResponse(
+                message=f"Successfully extracted {len(keywords)} keywords from paper: {result_data['title']}",
+                data=result_data
+            )
+            
+        except Exception as e:
+            return FailureResponse(
+                message=f"Unexpected error extracting keywords: {str(e)}",
+                data={
+                    "error_type": type(e).__name__,
+                    "paper_id": paper_id
+                }
+            )
+    
+    def _get_available_papers(self) -> List[Dict[str, Any]]:
+        """Get a list of available papers in the knowledge base."""
+        try:
+            # Get a sample of papers (limit to 10 for performance)
+            results = self.kb.collection.get(
+                limit=10,
+                include=["metadatas"]
+            )
+            
+            if not results or not results.get('metadatas'):
+                return []
+                
+            return [
+                {"id": meta.get('paper_id', 'unknown'), "title": meta.get('title', 'Untitled')}
+                for meta in results['metadatas']
+                if meta and 'paper_id' in meta
+            ]
+        except Exception:
+            return []
 
 class PlottingInput(BaseModel):
     json_data: str = Field(description="A JSON string containing the table data, with 'columns' and 'data' keys.")
@@ -583,20 +1411,86 @@ class DynamicVisualizationInput(BaseModel):
     chart_type: str | None = Field(default=None, description="Optional. The type of chart to generate (e.g., 'bar', 'line', 'scatter', 'box', 'violin', 'hist'). If not specified, infer from the data and analysis goal.")
 
 class DynamicVisualizationTool(BaseTool):
-    """
-    An advanced data visualization tool. It takes structured JSON data (optionally with a 'paper_id' or 'paper_name' column for multi-paper comparison) and a high-level goal,
+    """An advanced data visualization tool. It takes structured JSON data (optionally with a 'paper_id' or 'paper_name' column for multi-paper comparison) and a high-level goal,
     and then generates and executes Python code to create the best possible visualization.
-    It can create bar charts, line plots, scatter plots, pie charts, violin plots, box plots, histograms, and more.
-    """
+    It can create bar charts, line plots, scatter plots, pie charts, violin plots, box plots, histograms, and more."""
     name: str = "dynamic_visualization_tool"
     description: str = (
-        "Use this tool to create insightful data visualizations from structured JSON data. "
-        "Provide the data and a clear goal for the analysis. Optionally, specify a chart_type ('bar', 'line', 'scatter', 'box', 'violin', 'hist', etc.). "
-        "If the data includes a 'paper_id' or 'paper_name' column, the tool will group and compare across papers/models."
-    )
+            "Use this tool to create insightful data visualizations from structured JSON data. "
+            "Provide the data and a clear goal for the analysis. Optionally, specify a chart_type ('bar', 'line', 'scatter', 'box', 'violin', 'hist', etc.). "
+            "If the data includes a 'paper_id' or 'paper_name' column, the tool will group and compare across papers/models."
+        )
     args_schema: Type[DynamicVisualizationInput] = DynamicVisualizationInput
-    
     code_writing_llm: BaseChatModel
+    
+    def _run(self, json_data: str, analysis_goal: str, filename: str, chart_type: str = "") -> Dict[str, Any]:
+        """Generate a visualization from structured data.
+        
+        Args:
+            json_data: JSON string with 'columns' and 'data' keys
+            analysis_goal: Natural language description of the visualization goal
+            filename: Where to save the generated plot
+            chart_type: Optional chart type (e.g., 'bar', 'line', 'scatter')
+            
+        Returns:
+            Dict with status, message, and data containing the path to the saved plot
+        """
+        try:
+            # Parse input JSON
+            data = json.loads(json_data)
+            if not all(k in data for k in ['columns', 'data']):
+                return FailureResponse(
+                    message="Invalid data format: expected 'columns' and 'data' keys in JSON",
+                    data={"received_keys": list(data.keys())}
+                )
+                
+            # Create DataFrame
+            df = pd.DataFrame(data['data'], columns=data['columns'])
+            
+            # Generate code for visualization
+            code = self._generate_plotting_code(df.head().to_string(), analysis_goal, chart_type or None)
+            if not code:
+                return FailureResponse(
+                    message="Failed to generate plotting code",
+                    data={"analysis_goal": analysis_goal, "chart_type": chart_type}
+                )
+                
+            # Execute the code to generate the plot
+            execution_result = self.execute_python_code(code, df)
+            
+            if not execution_result.get('success', False):
+                return FailureResponse(
+                    message=f"Failed to generate visualization: {execution_result.get('error', 'Unknown error')}",
+                    data={"error_details": execution_result}
+                )
+                
+            # Ensure the plot was saved
+            if not os.path.exists(filename):
+                return FailureResponse(
+                    message="Plot generation completed but file was not found",
+                    data={"expected_path": os.path.abspath(filename)}
+                )
+                
+            return SuccessResponse(
+                message=f"Successfully generated visualization: {filename}",
+                data={
+                    "filename": filename,
+                    "absolute_path": os.path.abspath(filename),
+                    "analysis_goal": analysis_goal,
+                    "chart_type": chart_type or "auto-detected"
+                }
+            )
+            
+        except json.JSONDecodeError as e:
+            return FailureResponse(
+                message="Invalid JSON data provided",
+                data={"error": str(e)}
+            )
+        except Exception as e:
+            return FailureResponse(
+                message=f"Error generating visualization: {str(e)}",
+                data={"error_type": type(e).__name__}
+            )
 
     def _generate_plotting_code(self, df_head: str, analysis_goal: str, chart_type: str | None = None) -> str:
         """Uses an LLM to write robust, safe Python code to generate a plot."""
@@ -834,49 +1728,209 @@ class ConflictingResultsTool(BaseTool):
         analysis = self.extractor.find_contradictions(text_a, title_a, text_b, title_b, topic)
         return analysis
 
-class LiteratureGapInput(BaseModel):
     topic: str = Field(description="The central research topic to analyze for gaps.")
     num_papers_to_analyze: int = Field(default=5, description="The number of top papers on the topic to include in the analysis.")
 
 class LiteratureGapTool(BaseTool):
-    """
-    Analyzes a collection of top papers on a given topic to identify potential
+    """Analyzes a collection of top papers on a given topic to identify potential
     gaps in the literature and suggest future research directions.
+    
+    This tool performs a comprehensive analysis of the current state of research
+    on a given topic by examining multiple papers. It identifies trends, common
+    methodologies, and most importantly, areas that have not been sufficiently
+    explored in the existing literature.
     """
     name: str = "literature_gap_tool"
     description: str = (
         "A powerful research tool. Use this to analyze the current state of a research field "
-        "and get suggestions for novel future work. Operates on a collection of papers."
+        "and get suggestions for novel future work. Operates on a collection of papers. "
+        "Provide a topic and optionally the number of top papers to analyze (default: 5)."
     )
     args_schema: Type[LiteratureGapInput] = LiteratureGapInput
+    
     kb: KnowledgeBase
     extractor: Extractor
+    llm: BaseChatModel
+    max_papers: int = 10  # Maximum number of papers to analyze
+    min_papers: int = 2   # Minimum number of papers needed for meaningful analysis
 
-    def _run(self, topic: str, num_papers_to_analyze: int = 5) -> str:
-        search_results = self.kb.search(query=topic, n_results=num_papers_to_analyze * 5) # Get extra to find unique papers
+    def _run(self, topic: str, num_papers_to_analyze: int = 5) -> Dict[str, Any]:
+        """Analyze papers on a topic to find research gaps and opportunities.
         
-        paper_texts = {} # Use dict to handle uniqueness
-        ids = search_results.get('ids', [[]])[0] if search_results.get('ids') else []
-        metadatas = search_results.get('metadatas', [[]])[0] if search_results.get('metadatas') else []
-        for i in range(min(len(ids), len(metadatas))):
-            paper_id = metadatas[i].get('paper_id')
-            if not paper_id:
+        Args:
+            topic: The research topic to analyze
+            num_papers_to_analyze: Number of top papers to include in the analysis
+            
+        Returns:
+            Dict containing the analysis results or error information
+        """
+        # Validate input
+        num_papers_to_analyze = min(max(self.min_papers, num_papers_to_analyze), self.max_papers)
+        
+        try:
+            # Search for relevant papers
+            search_results = self.kb.search(query=topic, n_results=num_papers_to_analyze)
+            
+            if not search_results or not search_results.get('documents'):
+                return FailureResponse(
+                    message=f"No papers found on topic: {topic}",
+                    data={"topic": topic, "num_papers_searched": num_papers_to_analyze}
+                )
+            
+            # Check if we have enough papers for meaningful analysis
+            if len(search_results['documents']) < self.min_papers:
+                return FailureResponse(
+                    message=f"Found only {len(search_results['documents'])} papers, but need at least {self.min_papers} for analysis.",
+                    data={
+                        "topic": topic,
+                        "papers_found": len(search_results['documents']),
+                        "min_papers_required": self.min_papers
+                    }
+                )
+            
+            # Prepare paper data for analysis
+            papers_data = []
+            for i, doc in enumerate(search_results['documents']):
+                papers_data.append({
+                    "paper_id": search_results['ids'][i],
+                    "title": doc.get('title', f'Paper {i+1}'),
+                    "content": doc.get('content', '')[:2000],  # Limit content length
+                    "metadata": search_results['metadatas'][i] if 'metadatas' in search_results and i < len(search_results['metadatas']) else {}
+                })
+            
+            # Generate structured analysis
+            analysis = self._analyze_papers(topic, papers_data)
+            
+            return SuccessResponse(
+                message=f"Analysis completed for {len(papers_data)} papers on topic: {topic}",
+                data={
+                    "topic": topic,
+                    "papers_analyzed": [{"id": p["paper_id"], "title": p["title"]} for p in papers_data],
+                    "analysis": analysis,
+                    "timestamp": datetime.datetime.utcnow().isoformat()
+                }
+            )
+            
+        except Exception as e:
+            return FailureResponse(
+                message=f"Error analyzing literature gaps: {str(e)}",
+                data={
+                    "error_type": type(e).__name__,
+                    "topic": topic,
+                    "num_papers_requested": num_papers_to_analyze
+                }
+            )
+    
+    def _analyze_papers(self, topic: str, papers: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Perform the actual analysis of papers to identify gaps."""
+        # Prepare context for the LLM
+        papers_context = "\n\n".join([
+            f"PAPER {i+1}: {p['title']}\n"
+            f"Content: {p['content'][:1500]}..."
+            for i, p in enumerate(papers)
+        ])
+        
+        # Generate analysis prompt
+        prompt = f"""
+        You are a research analyst examining the current state of knowledge on: {topic}
+        
+        Below are {len(papers)} research papers on this topic:
+        
+        {papers_context}
+        
+        Please analyze these papers and provide a structured response with the following sections:
+        
+        1. CURRENT STATE OF RESEARCH:
+           - Main themes and approaches
+           - Common methodologies used
+           - Key findings and conclusions
+           
+        2. IDENTIFIED GAPS:
+           - Limitations in current research
+           - Contradictions between studies
+           - Underexplored aspects of the topic
+           - Methodological weaknesses
+           
+        3. FUTURE RESEARCH DIRECTIONS:
+           - Specific questions that remain unanswered
+           - Novel approaches that could be taken
+           - Potential interdisciplinary connections
+           - Methodological improvements
+           
+        4. MOST PROMISING OPPORTUNITIES:
+           - Rank 3-5 most promising research directions
+           - For each, explain why it's valuable and feasible
+        
+        Be specific, critical, and creative in your analysis. Support your points with evidence from the papers.
+        """
+        
+        try:
+            # Get analysis from LLM
+            response = self.llm.invoke(prompt)
+            
+            # Parse the response into a structured format
+            return self._parse_analysis_response(response.content)
+            
+        except Exception as e:
+            # If parsing fails, return the raw response
+            return {
+                "raw_analysis": str(response.content) if 'response' in locals() else str(e),
+                "parse_error": True if 'response' in locals() else False
+            }
+    
+    def _parse_analysis_response(self, response_text: str) -> Dict[str, Any]:
+        """Parse the LLM's response into a structured format."""
+        # This is a simplified parser - in practice, you might want to use more sophisticated parsing
+        # or ask the LLM to return structured JSON directly
+        sections = {
+            "current_state": "",
+            "identified_gaps": "",
+            "future_directions": "",
+            "promising_opportunities": []
+        }
+        
+        current_section = None
+        opportunities = []
+        
+        for line in response_text.split('\n'):
+            line = line.strip()
+            
+            # Detect section headers
+            if line.upper().startswith(('1. CURRENT', 'CURRENT STATE')):
+                current_section = "current_state"
                 continue
-            if paper_id not in paper_texts and len(paper_texts) < num_papers_to_analyze:
-                title = metadatas[i].get('title', paper_id)
-                doc_result = self.kb.collection.get(where={"paper_id": paper_id})
-                documents = doc_result.get('documents') if doc_result else None
-                if documents and isinstance(documents, list):
-                    text = " ".join(str(doc) for doc in documents if doc is not None)
+            elif line.upper().startswith(('2. IDENTIFIED', 'IDENTIFIED GAPS')):
+                current_section = "identified_gaps"
+                continue
+            elif line.upper().startswith(('3. FUTURE', 'FUTURE RESEARCH')):
+                current_section = "future_directions"
+                continue
+            elif line.upper().startswith(('4. MOST', 'MOST PROMISING')):
+                current_section = "promising_opportunities"
+                continue
+                
+            # Add content to current section
+            if current_section and line:
+                if current_section == "promising_opportunities":
+                    # Try to extract ranked opportunities
+                    if line.strip().startswith(('- ', '* ', '• ')) or re.match(r'^\d+\.\s', line):
+                        opportunities.append(line.lstrip('-*• 1234567890. '))
                 else:
-                    text = ""
-                paper_texts[paper_id] = {"title": title, "text": text}
-
-        if len(paper_texts) < 2:
-            return "Could not find enough relevant papers in the knowledge base to perform a gap analysis."
-
-        analysis = self.extractor.find_literature_gaps(list(paper_texts.values()), topic)
-        return analysis
+                    sections[current_section] += line + "\n"
+        
+        # Clean up sections
+        for key in sections:
+            if isinstance(sections[key], str):
+                sections[key] = sections[key].strip()
+        
+        # Add opportunities if we found any
+        if opportunities:
+            sections["promising_opportunities"] = [
+                {"rank": i+1, "description": opp}
+                for i, opp in enumerate(opportunities[:5])  # Limit to top 5
+            ]
+        
+        return sections
 
 class CsvExportInput(BaseModel):
     """Input model for the CSV Export Tool."""
@@ -884,37 +1938,70 @@ class CsvExportInput(BaseModel):
     filename: str = Field(description="The filename to save the CSV to (e.g., 'performance_data.csv').")
 
 class DataToCsvTool(BaseTool):
-    """
-    A utility tool to save structured JSON data into a CSV file.
-    This is useful for exporting extracted tables for further analysis in other programs.
-    """
+    """A utility tool to save structured JSON data into a CSV file.
+    This is useful for exporting extracted tables for further analysis in other programs."""
     name: str = "data_to_csv_tool"
     description: str = (
-        "Use this tool to save structured table data (in JSON format) to a CSV file. "
-        "This is the final step after you have extracted a table."
-    )
+            "Use this tool to save structured table data (in JSON format) to a CSV file. "
+            "This is the final step after you have extracted a table."
+        )
     args_schema: Type[CsvExportInput] = CsvExportInput
 
-    def _run(self, json_data: str, filename: str) -> str:
-        """Use the tool."""
+    def _run(self, json_data: str, filename: str) -> Dict[str, Any]:
+        """Save structured JSON data to a CSV file.
+        
+        Args:
+            json_data: A JSON string with 'columns' and 'data' keys
+            filename: The output filename for the CSV
+            
+        Returns:
+            Dict with status, message, and data containing file info
+        """
         try:
-            input_obj = json.loads(json_data)
+            data = json.loads(json_data)
+            if not all(k in data for k in ['columns', 'data']):
+                return FailureResponse(
+                    message="Invalid data format: expected 'columns' and 'data' keys in JSON",
+                    data={"received_keys": list(data.keys())}
+                )
 
-            if input_obj.get("status") != "success":
-                reason = input_obj.get("reason", "The previous tool failed to provide data.")
-                return f"Error: Cannot save to CSV because the required data was not provided. Reason: {reason}"
-
-            table_data = input_obj.get("data")
-            if not table_data:
-                return "Error: The previous tool succeeded but returned no data to save."
-
-            df = pd.DataFrame(table_data['data'], columns=table_data['columns'])
-
+            # Create and save DataFrame
+            df = pd.DataFrame(data['data'], columns=data['columns'])
             df.to_csv(filename, index=False)
-
-            return f"Successfully saved data to '{filename}'."
+            
+            # Verify file was created
+            if not os.path.exists(filename):
+                return FailureResponse(
+                    message="CSV file was not created successfully",
+                    data={"expected_path": os.path.abspath(filename)}
+                )
+                
+            return SuccessResponse(
+                message=f"Successfully saved data to {filename}",
+                data={
+                    "filename": filename,
+                    "absolute_path": os.path.abspath(filename),
+                    "num_rows": len(df),
+                    "columns": list(df.columns),
+                    "file_size_bytes": os.path.getsize(filename)
+                }
+            )
+            
+        except json.JSONDecodeError as e:
+            return FailureResponse(
+                message="Invalid JSON data provided",
+                data={"error": str(e)}
+            )
+        except PermissionError as e:
+            return FailureResponse(
+                message="Permission denied when trying to write CSV file",
+                data={"error": str(e), "filename": filename}
+            )
         except Exception as e:
-            return f"An error occurred while saving data to CSV: {e}"
+            return FailureResponse(
+                message=f"Error saving to CSV: {str(e)}",
+                data={"error_type": type(e).__name__, "filename": filename}
+            )
 
     async def _arun(self, json_data: str, filename: str) -> str:
         raise NotImplementedError("This tool does not support async yet.")

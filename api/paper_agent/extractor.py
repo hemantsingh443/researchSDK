@@ -291,79 +291,134 @@ class Extractor:
         return []
 
     def extract_keywords(self, paper_text: str, num_keywords: int) -> list[str]:
-        """Uses an LLM to pull out the most important keywords from a text."""
+        """
+        Extracts the most important keywords from a given text using an LLM.
+        
+        Args:
+            paper_text: The text to extract keywords from
+            num_keywords: The number of keywords to extract (will be capped at 50)
+            
+        Returns:
+            list[str]: A list of keyword strings, or an error message if extraction fails
+        """
+        # Ensure num_keywords is within a reasonable range
+        num_keywords = max(1, min(50, int(num_keywords)))
+        
         prompt = f"""
         You are an expert at scientific keyword extraction.
         From the following text, identify the {num_keywords} most important and specific keywords, concepts, and technical terms.
         Do not include generic terms like 'research', 'paper', or 'model'. Focus on specific, technical concepts.
         
-        Return your answer as a single JSON object with one key, \"keywords\", which is a list of strings.
+        Return your answer as a single JSON object with one key, "keywords", which is a list of strings.
+        Each item in the list should be a simple string, not an object or dictionary.
 
         Text:
         ---
         {paper_text[:20000]}
         ---
         
-        JSON output:
+        JSON output (example):
+        {{"keywords": ["transformer architecture", "attention mechanisms", "neural networks"]}}
         """
-        print(f"Sending request to LLM for keyword extraction...")
+        
+        print(f"Sending request to LLM for {num_keywords} keyword extraction...")
+        
+        def process_keywords(keywords_data) -> list[str]:
+            """Process and validate the keywords from the LLM response."""
+            if not isinstance(keywords_data, dict) or "keywords" not in keywords_data:
+                return ["Error: Invalid response format from LLM - missing 'keywords' field"]
+                
+            keywords = keywords_data["keywords"]
+            if not isinstance(keywords, list):
+                return ["Error: Expected 'keywords' to be a list"]
+                
+            # Filter out non-string values and ensure they're strings
+            filtered_keywords = []
+            for kw in keywords:
+                if isinstance(kw, (str, int, float)):
+                    filtered_keywords.append(str(kw))
+                # Skip any other types to avoid serialization issues
+                
+            if not filtered_keywords:
+                return ["Error: No valid keywords found in response"]
+                
+            return filtered_keywords
+        
         from langchain_google_genai import ChatGoogleGenerativeAI
-        if isinstance(self.client, ChatGoogleGenerativeAI) or isinstance(self.client, ChatOllama):
-            try:
-                response = self.client.invoke(prompt)
-                raw_content = response.content if hasattr(response, 'content') else str(response)
-                # Ensure raw_content is a string
-                if not isinstance(raw_content, str):
-                    raw_content = str(raw_content)
-                # Try to extract JSON from the response
+        from langchain_core.messages import HumanMessage
+        
+        try:
+            if isinstance(self.client, ChatGoogleGenerativeAI) or hasattr(self.client, '_llm_type') and self.client._llm_type == 'huggingface':
                 try:
-                    json_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
-                    if not json_match:
-                        return ["Error: No JSON object found in LLM response."]
-                    json_str = json_match.group(0)
-                    json_str = re.sub(r',\s*([\}\]])', r'\1', json_str)
-                    data = json.loads(json_str)
-                    return data.get("keywords", [])
-                except Exception:
-                    return ["Error parsing keywords from LLM response."]
-            except Exception as e:
-                err_str = str(e).lower()
-                if "quota" in err_str or "429" in err_str or "resourceexhausted" in err_str:
-                    print("Quota hit or rate limited in Extractor. Switching to local Llama 3 model...")
-                    self.client = ChatOllama(model="llama3:8b-instruct-q4_K_M", temperature=0.0)
                     response = self.client.invoke(prompt)
                     raw_content = response.content if hasattr(response, 'content') else str(response)
+                    
                     # Ensure raw_content is a string
                     if not isinstance(raw_content, str):
                         raw_content = str(raw_content)
+                        
                     # Try to extract JSON from the response
                     try:
+                        # Look for JSON pattern in the response
                         json_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
                         if not json_match:
-                            return ["Error: No JSON object found in LLM response."]
+                            return ["Error: No JSON object found in LLM response"]
+                            
                         json_str = json_match.group(0)
-                        json_str = re.sub(r',\s*([\}\]])', r'\1', json_str)
+                        # Clean up common JSON formatting issues
+                        json_str = re.sub(r',\s*([\}\]])', r'\1', json_str)  # Remove trailing commas
+                        json_str = json_str.replace('\n', ' ').replace('\r', '')  # Remove newlines
+                        
                         data = json.loads(json_str)
-                        return data.get("keywords", [])
-                    except Exception:
-                        return ["Error parsing keywords from LLM response."]
-                else:
-                    raise
-        else:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                response_format={"type": "json_object"}
-            )
-            try:
-                content = response.choices[0].message.content
-                if content is None:
-                    return ["Error: No content in OpenAI response."]
-                data = json.loads(content)
-                return data.get("keywords", [])
-            except (json.JSONDecodeError, AttributeError):
-                return ["Error parsing keywords from LLM response."]
+                        return process_keywords(data)
+                        
+                    except json.JSONDecodeError as je:
+                        print(f"JSON decode error: {je}")
+                        return ["Error: Failed to parse JSON from LLM response"]
+                        
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if any(x in err_str for x in ["quota", "429", "resourceexhausted", "rate limit"]):
+                        print("Quota hit or rate limited. Attempting fallback to local model...")
+                        try:
+                            from langchain_community.llms import Ollama
+                            self.client = Ollama(model="llama3:8b-instruct-q4_K_M", temperature=0.0)
+                            response = self.client.invoke(prompt)
+                            data = json.loads(response)
+                            return process_keywords(data)
+                        except Exception as fallback_error:
+                            print(f"Fallback model failed: {fallback_error}")
+                            return ["Error: Failed to extract keywords after fallback attempt"]
+                    else:
+                        print(f"Error in keyword extraction: {e}")
+                        return [f"Error during keyword extraction: {str(e)[:100]}"]
+                        
+            # Handle OpenAI-compatible API
+            else:
+                try:
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.0,
+                        response_format={"type": "json_object"}
+                    )
+                    
+                    content = response.choices[0].message.content
+                    if not content:
+                        return ["Error: Empty response from LLM"]
+                        
+                    data = json.loads(content)
+                    return process_keywords(data)
+                    
+                except json.JSONDecodeError:
+                    return ["Error: Invalid JSON in LLM response"]
+                except AttributeError:
+                    return ["Error: Unexpected response format from LLM"]
+                except Exception as e:
+                    return [f"Error in keyword extraction: {str(e)[:200]}"]
+                    
+        except Exception as e:
+            return [f"Unexpected error in keyword extraction: {str(e)[:200]}"]
 
     def find_contradictions(self, text_a: str, title_a: str, text_b: str, title_b: str, topic: str) -> str:
         """Uses a powerful LLM to perform a deep comparative analysis between two texts."""

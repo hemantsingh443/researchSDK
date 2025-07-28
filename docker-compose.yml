@@ -1,11 +1,29 @@
 
 services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=production
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+
   api:
-    build: ./api 
+    build: 
+      context: ./api
+      args:
+        - NODE_ENV=production
     ports:
       - "8000:8000"
     volumes:
       - ./api:/app
+      - ./frontend/dist:/app/frontend/dist
       - api-artifacts:/app/artifacts
     env_file:
       - ./.env
@@ -14,6 +32,12 @@ services:
       - NEO4J_URI=bolt://db:7687
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000 # Chroma's internal port
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 12G  # Increased memory for model loading
+    shm_size: '4gb'  # Increased shared memory for PyTorch
     depends_on:
       grobid:
         condition: service_healthy
@@ -22,10 +46,11 @@ services:
       chromadb:
         condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/ || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
+      start_period: 60s  # Give more time for the model to load
 
   db:
     image: neo4j:5-community

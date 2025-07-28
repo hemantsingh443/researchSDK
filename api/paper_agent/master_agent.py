@@ -1,340 +1,331 @@
-from .agent import PaperAgent as WorkerAgent 
-from langchain_core.language_models.chat_models import BaseChatModel
-from typing import Dict, Any
 import json
+import re
+import os
+from typing import Dict, Any, List, Optional, Union
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.chat_models import ChatOllama
+from dotenv import load_dotenv
+
+from .tools import get_tools
+from .knowledge_base import KnowledgeBase
+from .ingestor import Ingestor
+from .extractor import Extractor
+
+# Load environment variables
+load_dotenv()
 
 class MasterAgent:
     """
-    A stateful, self-correcting agent that can reason, re-plan, and
-    execute complex tasks by orchestrating a worker agent and its tools.
+    A powerful, stateful agent that can reason, plan, and execute complex research tasks.
+    It operates in a loop, maintains a state, and can self-correct its plan.
+    This class merges the original Master/Worker/Planner roles into one cohesive unit.
     """
-    def __init__(self, worker_agent: WorkerAgent, llm: BaseChatModel, max_loops: int = 20):
-        self.worker_agent = worker_agent
-        self.llm = llm
+    def __init__(self, llm_provider: str = "google", max_loops: int = 15):
+        """Initialize the MasterAgent with the specified LLM provider.
+        
+        Args:
+            llm_provider: The LLM provider to use ("google" or "local")
+            max_loops: Maximum number of reasoning loops before termination
+        """
+        print("--- Initializing Master Agent ---")
         self.max_loops = max_loops
+        
+        # Initialize LLM based on provider
+        self.llm = self._initialize_llm(llm_provider)
+        
+        # Initialize components with proper configuration
+        self.ingestor = Ingestor()
+        
+        # Load configuration from environment variables
+        neo4j_uri = os.getenv("NEO4J_URI", "neo4j://localhost:7687")
+        neo4j_user = os.getenv("NEO4J_USER", "neo4j")
+        neo4j_password = os.getenv("NEO4J_PASSWORD", "password")
+        chroma_db_path = os.getenv("CHROMA_DB_PATH", "./paper_db")
+        
+        self.kb = KnowledgeBase(
+            db_path=chroma_db_path,
+            neo4j_uri=neo4j_uri,
+            neo4j_user=neo4j_user,
+            neo4j_password=neo4j_password
+        )
+        
+        # Initialize extractor with appropriate model based on provider
+        extractor_model = "gemini-1.5-flash" if llm_provider == "google" else "llama3:8b-instruct-q4_K_M"
+        self.extractor = Extractor(api_type=llm_provider, model=extractor_model)
+        
+        # Initialize tools with proper dependencies
+        self.tools = get_tools(self.kb, self.extractor, self.ingestor, self.llm)
         self.tool_manifest = self._create_tool_manifest()
-        print("MasterAgent initialized. The true brain is online.")
+        self.tool_dict = {tool.name: tool for tool in self.tools}
+        
+        # Initialize RAG pipeline for question answering
+        self.rag_agent = self._create_rag_pipeline()
+        
+        print(f"LLM Provider: {llm_provider}")
+        print(f"Tools Initialized: {[tool.name for tool in self.tools]}")
+        print("--- Master Agent Ready ---")
 
     def _create_tool_manifest(self) -> str:
         """Creates a string representation of the available tools for the planner prompt."""
-        manifest = ""
-        for tool in self.worker_agent.tools:
-            manifest += f"Tool Name: {tool.name}\n"
-            manifest += f"Tool Description: {tool.description}\n"
-            manifest += f"Tool Arguments: {tool.args}\n\n"
-        return manifest
+        return "\n\n".join([f"Tool Name: {tool.name}\nDescription: {tool.description}\nArguments: {tool.args}" for tool in self.tools])
 
     def _clean_and_parse_json(self, json_string: str) -> Dict[str, Any]:
-        """
-        A robust function to clean and parse a JSON string from an LLM response.
-        It handles markdown code blocks, extra text, and other common LLM artifacts.
-        """
-        import re
-        if json_string.startswith("```json"):
-            json_string = json_string[7:]
-            if json_string.endswith("```"):
-                json_string = json_string[:-3]
-        if json_string.startswith("```"):
-            json_string = json_string[3:]
-            if json_string.endswith("```"):
-                json_string = json_string[:-3]
-        json_string = json_string.strip()
+        """Robustly cleans and parses a JSON string from an LLM response."""
+        # Find the first '{' and the last '}' to extract the JSON object
         match = re.search(r'\{.*\}', json_string, re.DOTALL)
-        if match:
-            json_str = match.group(0)
-            return json.loads(json_str)
-        else:
-            raise ValueError("No JSON object found in LLM response.")
+        if not match:
+            raise ValueError("No valid JSON object found in the LLM response.")
+        
+        json_str = match.group(0)
+        # Remove trailing commas that would make the JSON invalid
+        json_str = re.sub(r',\s*([\}\]])', r'\1', json_str)
+        
+        return json.loads(json_str)
 
-    def run(self, user_query: str):
-        """The main loop of the Master Agent, now with a final synthesis step and explicit planning."""
-        state: Dict[str, Any] = {
-            "original_request": user_query,
-            "completed_steps": []
-        }
-        plan_prompt = f"""
-You are a world-class AI project planner. Your job is to break down the following user request into the SHORTEST, most EFFICIENT sequence of tool-based steps, using the available tools:
----\n{self.tool_manifest}\n---\nUser Request: '{user_query}'\n---\nRules:\n1. Each step must use a specific tool and specify its required arguments.\n2. Chain steps so outputs from one can be used as inputs for the next.\n3. Be explicit and efficient.\n4. Output ONLY a numbered list of steps, no extra text.\n"""
-        plan_response = self.llm.invoke(plan_prompt).content
-        if not isinstance(plan_response, list):
-            plan_response = [plan_response]
-        plan_lines = []
-        for item in plan_response:
-            item_str = str(item)
-            plan_lines.extend(item_str.split('\n'))
-        plan = []
-        for line in plan_lines:
-            line = line.strip()
-            if line and line[0].isdigit():
-                step = line.split('.', 1)[-1].lstrip(" )-")
-                plan.append(step)
-        state["plan"] = plan
-        print("--- Generated Plan ---")
-        for i, step in enumerate(plan):
-            print(f"{i+1}. {step}")
-        for i in range(self.max_loops):
-            print(f"\n{'='*20} MASTER AGENT LOOP {i+1}/{self.max_loops} {'='*20}")
-            master_prompt = self._create_master_prompt(state)
-            print("MasterAgent is thinking...")
-            try:
-                llm_response_str = self.llm.invoke(master_prompt).content
-            except Exception as e:
-                err_str = str(e).lower()
-                if "quota" in err_str or "429" in err_str or "resourceexhausted" in err_str:
-                    print("Quota hit or rate limited. Switching to local Llama 3 model...")
-                    from langchain_community.chat_models import ChatOllama
-                    self.llm = ChatOllama(model="llama3:8b-instruct-q4_K_M", temperature=0.0)
-                    llm_response_str = self.llm.invoke(master_prompt).content
-                else:
-                    raise
-            try:
-                response_str = llm_response_str
-                if not isinstance(response_str, str):
-                    if isinstance(response_str, list):
-                        response_str = "\n".join([str(x) for x in response_str])
-                    else:
-                        response_str = str(response_str)
-                decision = self._clean_and_parse_json(response_str)
-                thought = decision.get("thought", "No thought provided.")
-                action_json = decision.get("action", {})
-            except (json.JSONDecodeError, AttributeError) as e:
-                print(f"MasterAgent failed to generate valid JSON. Error: {e}")
-                print(f"Raw Response was: {llm_response_str}")
-                break
-            print(f"Thought: {thought}")
-            if isinstance(action_json, dict):
-                action_name = action_json.get("action")
-                action_input = action_json.get("action_input")
-            elif isinstance(action_json, str):
-                action_name = action_json
-                action_input = None
-            else:
-                action_name = None
-                action_input = None
-            if action_name == "Final Answer":
-                print("MasterAgent has decided the task is complete. Moving to final report generation.")
-                state["completed_steps"].append({
-                    "step": i + 1,
-                    "thought": thought,
-                    "action_taken": "Final Answer",
-                    "observation": action_input
-                })
-                break
-            if isinstance(action_name, str) and action_name:
-                print(f"MasterAgent directs worker to execute: {action_name}")
-                worker_response = self.worker_agent.run_single_tool(action_name, action_input)
-                state["completed_steps"].append({
-                    "step": i + 1,
-                    "thought": thought,
-                    "action_taken": action_json,
-                    "observation": worker_response
-                })
-                try:
-                    if action_name == "table_extraction_tool":
-                        import json
-                        paper_id = action_input.get("paper_id") if isinstance(action_input, dict) else None
-                        if worker_response and worker_response.strip().startswith("{"):
-                            table_json = json.loads(worker_response)
-                            if paper_id:
-                                state[f"table_{paper_id}"] = table_json
-                                print(f"[Context Passing] Stored table for {paper_id}")
-                    if action_name == "paper_summarization_tool":
-                        paper_id = action_input.get("paper_id") if isinstance(action_input, dict) else None
-                        if paper_id:
-                            state[f"summary_{paper_id}"] = worker_response
-                            print(f"[Context Passing] Stored summary for {paper_id}")
-                except Exception as e:
-                    print(f"[Context Passing Error]: {e}")
-            else:
-                print("Invalid or missing action name. Skipping this step.")
-                break
-        else:
-            print("MasterAgent reached maximum loops.")
-        print("\n\n" + "="*20 + " GENERATING FINAL REPORT " + "="*20)
-        final_synthesis_prompt = f"""
-        You are a brilliant scientific analyst and writer. The project to answer '{state['original_request']}' is complete.
-        Your task is to synthesize all the information gathered in the 'Project State' into a single, comprehensive report for the user.
-
-        **Structure your report as follows:**
-        1.  **Executive Summary:** A single paragraph that directly answers the user's core request.
-        2.  **Key Findings:** A bulleted list of the most important insights discovered.
-        3.  **Detailed Analysis:** A more in-depth explanation of the steps taken and the information found.
-        4.  **Visualizations:** Reference any plots that were created and explain what they show.
-        5.  **Conclusion & Limitations:** Conclude the report and mention any steps that could not be completed and why (e.g., "The requested table could not be extracted due to...").
-        6.  **Plan:** Include the explicit step-by-step plan that was followed.
-
-        **PROJECT STATE (The full history of your work):**
-        ---
-        {json.dumps(state, indent=2)}
-        ---
-
-        Write the final report in clear, professional language using Markdown formatting.
-        """
-        final_report = self.llm.invoke(final_synthesis_prompt).content
-        return final_report
-
-    def run_with_thoughts(self, user_query: str):
-        """
-        Runs the main loop and returns both the final report and the completed_steps (thought process).
-        """
-        state: Dict[str, Any] = {
-            "original_request": user_query,
-            "completed_steps": []
-        }
-        plan_prompt = f"""
-You are a world-class AI project planner. Your job is to break down the following user request into the SHORTEST, most EFFICIENT sequence of tool-based steps, using the available tools:
----\n{self.tool_manifest}\n---\nUser Request: '{user_query}'\n---\nRules:\n1. Each step must use a specific tool and specify its required arguments.\n2. Chain steps so outputs from one can be used as inputs for the next.\n3. Be explicit and efficient.\n4. Output ONLY a numbered list of steps, no extra text.\n"""
-        plan_response = self.llm.invoke(plan_prompt).content
-        if not isinstance(plan_response, list):
-            plan_response = [plan_response]
-        plan_lines = []
-        for item in plan_response:
-            item_str = str(item)
-            plan_lines.extend(item_str.split('\n'))
-        plan = []
-        for line in plan_lines:
-            line = line.strip()
-            if line and line[0].isdigit():
-                step = line.split('.', 1)[-1].lstrip(" )-")
-                plan.append(step)
-        state["plan"] = plan
-        print("--- Generated Plan ---")
-        for i, step in enumerate(plan):
-            print(f"{i+1}. {step}")
-        for i in range(self.max_loops):
-            print(f"\n{'='*20} MASTER AGENT LOOP {i+1}/{self.max_loops} {'='*20}")
-            master_prompt = self._create_master_prompt(state)
-            print("MasterAgent is thinking...")
-            try:
-                llm_response_str = self.llm.invoke(master_prompt).content
-            except Exception as e:
-                err_str = str(e).lower()
-                if "quota" in err_str or "429" in err_str or "resourceexhausted" in err_str:
-                    print("Quota hit or rate limited. Switching to local Llama 3 model...")
-                    from langchain_community.chat_models import ChatOllama
-                    self.llm = ChatOllama(model="llama3:8b-instruct-q4_K_M", temperature=0.0)
-                    llm_response_str = self.llm.invoke(master_prompt).content
-                else:
-                    raise
-            try:
-                response_str = llm_response_str
-                if not isinstance(response_str, str):
-                    if isinstance(response_str, list):
-                        response_str = "\n".join([str(x) for x in response_str])
-                    else:
-                        response_str = str(response_str)
-                decision = self._clean_and_parse_json(response_str)
-                thought = decision.get("thought", "No thought provided.")
-                action_json = decision.get("action", {})
-            except (json.JSONDecodeError, AttributeError) as e:
-                print(f"MasterAgent failed to generate valid JSON. Error: {e}")
-                print(f"Raw Response was: {llm_response_str}")
-                break
-            print(f"Thought: {thought}")
-            if isinstance(action_json, dict):
-                action_name = action_json.get("action")
-                action_input = action_json.get("action_input")
-            elif isinstance(action_json, str):
-                action_name = action_json
-                action_input = None
-            else:
-                action_name = None
-                action_input = None
-            if action_name == "Final Answer":
-                print("MasterAgent has decided the task is complete. Moving to final report generation.")
-                state["completed_steps"].append({
-                    "step": i + 1,
-                    "thought": thought,
-                    "action_taken": "Final Answer",
-                    "observation": action_input
-                })
-                break
-            if isinstance(action_name, str) and action_name:
-                print(f"MasterAgent directs worker to execute: {action_name}")
-                worker_response = self.worker_agent.run_single_tool(action_name, action_input)
-                state["completed_steps"].append({
-                    "step": i + 1,
-                    "thought": thought,
-                    "action_taken": action_json,
-                    "observation": worker_response
-                })
-                try:
-                    if action_name == "table_extraction_tool":
-                        import json
-                        paper_id = action_input.get("paper_id") if isinstance(action_input, dict) else None
-                        if worker_response and worker_response.strip().startswith("{"):
-                            table_json = json.loads(worker_response)
-                            if paper_id:
-                                state[f"table_{paper_id}"] = table_json
-                                print(f"[Context Passing] Stored table for {paper_id}")
-                    if action_name == "paper_summarization_tool":
-                        paper_id = action_input.get("paper_id") if isinstance(action_input, dict) else None
-                        if paper_id:
-                            state[f"summary_{paper_id}"] = worker_response
-                            print(f"[Context Passing] Stored summary for {paper_id}")
-                except Exception as e:
-                    print(f"[Context Passing Error]: {e}")
-            else:
-                print("Invalid or missing action name. Skipping this step.")
-                break
-        else:
-            print("MasterAgent reached maximum loops.")
-        print("\n\n" + "="*20 + " GENERATING FINAL REPORT " + "="*20)
-        final_synthesis_prompt = f"""
-        You are a brilliant scientific analyst and writer. The project to answer '{state['original_request']}' is complete.
-        Your task is to synthesize all the information gathered in the 'Project State' into a single, comprehensive report for the user.
-
-        **Structure your report as follows:**
-        1.  **Executive Summary:** A single paragraph that directly answers the user's core request.
-        2.  **Key Findings:** A bulleted list of the most important insights discovered.
-        3.  **Detailed Analysis:** A more in-depth explanation of the steps taken and the information found.
-        4.  **Visualizations:** Reference any plots that were created and explain what they show.
-        5.  **Conclusion & Limitations:** Conclude the report and mention any steps that could not be completed and why (e.g., "The requested table could not be extracted due to...").
-        6.  **Plan:** Include the explicit step-by-step plan that was followed.
-
-        **PROJECT STATE (The full history of your work):**
-        ---
-        {json.dumps(state, indent=2)}
-        ---
-
-        Write the final report in clear, professional language using Markdown formatting.
-        """
-        final_report = self.llm.invoke(final_synthesis_prompt).content
-        return final_report, state["completed_steps"]
-
-    def _create_master_prompt(self, state: Dict[str, Any]) -> str:
+    def _create_prompt(self, state: Dict[str, Any]) -> str:
         """Creates the dynamic prompt for the master LLM."""
         return f"""
-You are the Master Agent, a hyper-intelligent AI that directs a worker agent to solve complex user requests.
-Your job is to analyze the user's goal and the history of actions taken so far, then decide the single best next action.
+You are the Master Agent, a hyper-intelligent AI directing research. Your job is to analyze the user's goal and the history of actions taken, then decide the single best next action to solve the user's request.
 
 **TOOLS OVERVIEW:**
 ---
 {self.tool_manifest}
 ---
 
-**PROJECT STATE:**
+**PROJECT STATE (History of steps taken and data collected):**
 ---
-{json.dumps(state, indent=2)}
+{self._serialize_state(state)}
 ---
 
 **YOUR TASK:**
-Based on the project state, what is the single best next action to take to progress towards the original request?
+Based on the project state, what is the single best next action to take?
 
-**RULES:**
-1.  **Analyze the observations:** Look at the 'observation' from the last completed step. Did it succeed? Did it fail? Does it contain the information you need?
-2.  **Self-Correct:** If a previous action failed or didn't provide the right information, change the plan! Do not repeat the same failed action. Try a different tool or different inputs.
-3.  **Conclude:** If the last observation contains enough information to answer the original request, your next action MUST be 'Final Answer'.
+**RULES OF REASONING:**
+1.  **Analyze Observations:** Look at the `observation` from the last step. Did it succeed or fail? Does it contain the information you need?
+2.  **Self-Correct:** If a tool failed, DO NOT try the same tool again with the same inputs. Analyze the reason for failure.
+    - If you need a piece of information (e.g., a `paper_id`), and the tool to get it failed, try a different tool or approach to get that information.
+    - If a downstream tool failed because an upstream tool didn't provide data (e.g., visualization failed because table extraction found nothing), DO NOT try the downstream tool again. Acknowledge the missing data and either find another way to get it or conclude that it's unavailable.
+3.  **Stateful Data:** Refer to data in the `scratchpad` to inform your next action. For example, if `scratchpad.paper_id` exists, use it.
+4.  **Conclude:** When you have gathered enough information to comprehensively answer the user's original request, your action MUST be `Final Answer`.
 
-Respond with a single JSON object with two keys: "thought" (your reasoning for the decision) and "action" (the action to take).
+Respond with a single JSON object with two keys: "thought" (your detailed reasoning) and "action" (the tool to use and its input).
 
-Example of a valid response:
+**Example Response:**
 {{
-    "thought": "The previous step failed to find the paper by title. I will now try to find it using its known arXiv ID, which is a more reliable method.",
+    "thought": "The user wants to compare two papers. I have successfully found the ID for the first paper and stored it in the scratchpad. Now I need to find the ID for the second paper, 'BERT'.",
     "action": {{
-        "action": "arxiv_fetch_by_id_tool",
-        "action_input": {{"paper_arxiv_id": "1706.03762"}}
+        "name": "get_paper_metadata_by_title",
+        "input": {{"query": "BERT"}}
     }}
 }}
 """
+
+    def run(self, user_query: str):
+        """The main loop of the Master Agent."""
+        state = {
+            "original_request": user_query,
+            "completed_steps": [],
+            "scratchpad": {} # A place to store important data like IDs, tables, etc.
+        }
+
+        for i in range(self.max_loops):
+            print(f"\n{'='*20} MASTER AGENT LOOP {i+1}/{self.max_loops} {'='*20}")
+            
+            # 1. Create the prompt based on the current state
+            master_prompt = self._create_prompt(state)
+            
+            # 2. Get the LLM's decision
+            print("MasterAgent is thinking...")
+            llm_response_str = self.llm.invoke(master_prompt).content
+            
+            try:
+                decision = self._clean_and_parse_json(llm_response_str)
+                thought = decision.get("thought", "No thought provided.")
+                action = decision.get("action", {})
+                action_name = action.get("name")
+                action_input = action.get("input")
+                print(f"Thought: {thought}")
+            except Exception as e:
+                print(f"MasterAgent failed to generate a valid JSON decision. Error: {e}")
+                print(f"Raw Response was: {llm_response_str}")
+                state['completed_steps'].append({"step": i+1, "thought": "Error in parsing LLM decision.", "action_taken": "None", "observation": str(e)})
+                continue
+
+            # 3. Check for termination
+            if action_name == "Final Answer":
+                print("MasterAgent has decided the task is complete.")
+                state["completed_steps"].append({"step": i + 1, "thought": thought, "action_taken": "Final Answer", "observation": action_input})
+                break
+
+            # 4. Execute the chosen tool
+            if action_name in self.tool_dict:
+                print(f"MasterAgent executes: {action_name} with input: {action_input}")
+                tool_to_run = self.tool_dict[action_name]
+                try:
+                    # Use .invoke() for LangChain tools which handles argument mapping
+                    observation = tool_to_run.invoke(action_input)
+                    print(f"Observation: {observation}")
+                except Exception as e:
+                    observation = f"Error executing tool '{action_name}': {e}"
+                    print(f"ERROR: {observation}")
+                
+                # Update state
+                state["completed_steps"].append({"step": i + 1, "thought": thought, "action_taken": action, "observation": observation})
+                
+                # --- STATEFUL SCRATCHPAD UPDATE ---
+                # A more robust way to pass context
+                if isinstance(observation, dict) and observation.get('status') == 'success':
+                    if action_name == 'get_paper_metadata_by_title':
+                        state['scratchpad']['paper_metadata'] = observation['data']
+                    elif action_name == 'table_extraction_tool':
+                        state['scratchpad']['extracted_table'] = observation['data']
+
+            else:
+                print(f"Error: Chosen tool '{action_name}' not found.")
+                state['completed_steps'].append({"step": i + 1, "thought": thought, "action_taken": action, "observation": f"Tool '{action_name}' does not exist."})
+        
+        else:
+            print("MasterAgent reached maximum loops.")
+
+        # 5. Final Synthesis
+        print("\n" + "="*20 + " GENERATING FINAL REPORT " + "="*20)
+        final_report = self._synthesize_final_report(state)
+        
+        # Return the final report and the thought process for the API
+        return final_report, state["completed_steps"]
+
+    def _initialize_llm(self, provider: str) -> BaseChatModel:
+        """Initialize the appropriate LLM based on the provider."""
+        if provider == "google":
+            if not os.getenv("GOOGLE_API_KEY"):
+                raise ValueError("GOOGLE_API_KEY not found in environment variables.")
+            return ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.1)
+        elif provider == "local":
+            return ChatOllama(model="llama3:8b-instruct-q4_K_M", temperature=0.0)
+        else:
+            raise ValueError(f"Unsupported LLM provider: {provider}")
+
+    def _serialize_state(self, state: Dict[str, Any]) -> str:
+        """Safely serialize the state dictionary, handling custom response objects.
+        
+        Args:
+            state: The state dictionary to serialize
+            
+        Returns:
+            A JSON string representation of the state
+        """
+        def default_serializer(obj):
+            if hasattr(obj, 'dict'):
+                return obj.dict()
+            elif hasattr(obj, '__dict__'):
+                return obj.__dict__
+            return str(obj)
+            
+        try:
+            return json.dumps(state, indent=2, default=default_serializer)
+        except Exception as e:
+            print(f"Error serializing state: {e}")
+            # Fallback to a simplified representation
+            return json.dumps({
+                k: str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v 
+                for k, v in state.items()
+            }, indent=2)
+
+    def _create_rag_pipeline(self):
+        """Create a RAG pipeline for question answering."""
+        class TempRAGAgent:
+            def __init__(self, kb, llm):
+                self.kb = kb
+                self.llm = llm
+            
+            def run_query(self, user_query: str) -> str:
+                """Run a query against the RAG pipeline."""
+                context_str = ""
+                search_results = self.kb.search(query=user_query, n_results=3)
+                
+                if not search_results or 'ids' not in search_results or not search_results['ids']:
+                    return "No relevant documents found in the knowledge base."
+                    
+                for i in range(len(search_results['ids'][0])):
+                    doc = search_results['documents'][0][i]
+                    meta = search_results['metadatas'][0][i]
+                    context_str += f"--- Context Snippet {i+1} ---\n"
+                    context_str += f"Source Metadata: {meta}\n"
+                    context_str += f"Content: {doc}\n\n"
+                
+                prompt = (
+                    "Answer the user's question based ONLY on the provided context, "
+                    "which includes metadata and content for each snippet:\n"
+                    f"<context>\n{context_str}\n</context>\n\n"
+                    f"Question: {user_query}"
+                )
+                
+                try:
+                    response = self.llm.invoke(prompt)
+                    return response.content
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    if any(x in error_msg for x in ["quota", "429", "resourceexhausted"]):
+                        print("Quota hit or rate limited. Falling back to local model...")
+                        # Fall back to local model if available
+                        if not isinstance(self.llm, ChatOllama):
+                            self.llm = ChatOllama(model="llama3:8b-instruct-q4_K_M", temperature=0.0)
+                            return self.run_query(user_query)
+                    return f"Error in RAG pipeline: {str(e)}"
+        
+        return TempRAGAgent(self.kb, self.llm)
+    def run_single_tool(self, tool_name: str, tool_input: dict) -> Union[str, dict]:
+        """
+        Execute a single tool directly without the full agentic loop.
+        
+        Args:
+            tool_name: Name of the tool to execute
+            tool_input: Dictionary of input parameters for the tool
+            
+        Returns:
+            The tool's output as a string or dict
+        """
+        if tool_name not in self.tool_dict:
+            return f"Error: Tool '{tool_name}' not found."
+            
+        try:
+            tool = self.tool_dict[tool_name]
+            if hasattr(tool, 'invoke'):
+                return tool.invoke(tool_input)
+            elif hasattr(tool, 'run'):
+                return tool.run(tool_input)
+            else:
+                return f"Error: Tool '{tool_name}' has no callable method."
+        except Exception as e:
+            return f"Error running tool '{tool_name}': {str(e)}"
+
+    def _synthesize_final_report(self, state: Dict[str, Any]) -> str:
+        """Generates the final comprehensive report for the user."""
+        try:
+            # Use _serialize_state to properly handle JSON serialization
+            serialized_state = self._serialize_state(state)
+            
+            synthesis_prompt = f"""
+You are a brilliant scientific analyst. The project to answer '{state.get('original_request', 'the user query')}' is complete.
+Synthesize all information from the 'PROJECT STATE' into a single, comprehensive Markdown report.
+
+**Structure your report as follows:**
+1.  **Executive Summary:** A single paragraph directly answering the user's core request.
+2.  **Key Findings:** A bulleted list of the most important insights.
+3.  **Detailed Analysis:** In-depth explanation of the steps taken and information found. If some steps failed, explain why.
+4.  **Visualizations:** Reference any plots or artifacts created and explain them.
+5.  **Conclusion & Limitations:** Conclude the report and mention any limitations.
+
+**PROJECT STATE (The full history of your work):**
+---
+{serialized_state}
+---
+
+Write the final report in Markdown format.
+"""
+            final_report = self.llm.invoke(synthesis_prompt).content
+            return final_report
+            
+        except Exception as e:
+            return f"Error generating final report: {str(e)}\n\nRaw state data (simplified):\n{self._serialize_state(state)}"
