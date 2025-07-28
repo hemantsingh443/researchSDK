@@ -992,25 +992,35 @@ class CitationAnalysisTool(BaseTool):
     - Most cited papers (highest incoming citations)
     - Most connected papers (most outgoing references)
     - Foundational papers (highly cited and highly connected)
+    - Citation network for a specific paper
     
     Results are returned in a structured format with detailed metadata.
     """
     name: str = "citation_analysis_tool"
     description: str = (
-        "Use this to find influential papers. 'most_cited' finds papers that many others reference. "
-        "'hottest_papers' finds papers that reference many others (indicating broad literature review). "
-        "'foundational' finds papers that are both highly cited and reference many other works."
+        "Use this to analyze citation patterns and find influential papers. "
+        "Analysis types:\n"
+        "- 'most_cited': Papers with the most incoming citations\n"
+        "- 'hottest_papers': Papers that cite many others (broad literature review)\n"
+        "- 'foundational': Highly cited papers that also cite many works\n"
+        "- 'paper_network': Citation network for a specific paper"
     )
     args_schema: Type[CitationAnalysisInput] = CitationAnalysisInput
     graph: Neo4jGraph
-    max_results: int = 10  # Default max results
+    max_results: int = 20  # Increased default max results
+    llm: Optional[BaseChatModel] = None  # Optional LLM for enhanced analysis
+    
+    class Config:
+        arbitrary_types_allowed = True  # Allow Neo4jGraph type
 
-    def _run(self, analysis_type: str, limit: int = 5) -> Dict[str, Any]:
+    def _run(self, analysis_type: str, limit: int = 5, paper_id: Optional[str] = None) -> Dict[str, Any]:
         """Perform citation analysis on the knowledge graph.
         
         Args:
-            analysis_type: Type of analysis to perform ('most_cited', 'hottest_papers', 'foundational')
+            analysis_type: Type of analysis to perform 
+                         ('most_cited', 'hottest_papers', 'foundational', 'paper_network')
             limit: Maximum number of results to return (capped at max_results)
+            paper_id: Optional paper ID for paper-specific analysis
             
         Returns:
             Dict containing analysis results or error information
@@ -1019,30 +1029,60 @@ class CitationAnalysisTool(BaseTool):
         limit = min(max(1, limit), self.max_results)  # Ensure limit is reasonable
         
         try:
+            # Check if graph is connected
+            if not self._check_graph_connection():
+                return FailureResponse(
+                    message="Failed to connect to the knowledge graph. Please check the connection.",
+                    data={"analysis_type": analysis_type}
+                )
+            
+            # Route to appropriate analysis method
             if analysis_type == "most_cited":
                 return self._find_most_cited(limit)
             elif analysis_type == "hottest_papers":
                 return self._find_hottest_papers(limit)
             elif analysis_type == "foundational":
                 return self._find_foundational_papers(limit)
+            elif analysis_type == "paper_network" and paper_id:
+                return self._analyze_paper_network(paper_id, limit)
             else:
                 return FailureResponse(
-                    message=f"Unknown analysis type: {analysis_type}",
+                    message=f"Invalid analysis type or missing paper_id: {analysis_type}",
                     data={
-                        "valid_types": ["most_cited", "hottest_papers", "foundational"],
-                        "provided_type": analysis_type
+                        "valid_types": ["most_cited", "hottest_papers", "foundational", "paper_network"],
+                        "provided_type": analysis_type,
+                        "paper_id_provided": bool(paper_id)
                     }
                 )
                 
         except Exception as e:
+            error_msg = f"Error performing {analysis_type} analysis"
+            error_data = {
+                "error_type": type(e).__name__,
+                "analysis_type": analysis_type,
+                "limit": limit,
+                "paper_id": paper_id
+            }
+            
+            # Add more context for specific error types
+            if "ConnectionError" in str(e) or "ServiceUnavailable" in str(e):
+                error_msg = "Failed to connect to the knowledge graph. The service may be down or unreachable."
+                error_data["suggestion"] = "Please check your Neo4j connection and try again."
+            
             return FailureResponse(
-                message=f"Error performing citation analysis: {str(e)}",
-                data={
-                    "error_type": type(e).__name__,
-                    "analysis_type": analysis_type,
-                    "limit": limit
-                }
+                message=f"{error_msg}: {str(e)}",
+                data=error_data
             )
+    
+    def _check_graph_connection(self, max_retries: int = 2) -> bool:
+        """Check if the graph database is accessible."""
+        try:
+            # Simple query to test connection
+            self.graph.query("RETURN 1 AS test")
+            return True
+        except Exception as e:
+            print(f"Graph connection check failed: {e}")
+            return False
             
     def _find_most_cited(self, limit: int) -> Dict[str, Any]:
         """Find the most cited papers in the knowledge graph."""
@@ -1948,16 +1988,27 @@ class DataToCsvTool(BaseTool):
     args_schema: Type[CsvExportInput] = CsvExportInput
 
     def _run(self, json_data: str, filename: str) -> Dict[str, Any]:
-        """Save structured JSON data to a CSV file.
+        """Save structured JSON data to a CSV file in the artifacts directory.
         
         Args:
             json_data: A JSON string with 'columns' and 'data' keys
-            filename: The output filename for the CSV
+            filename: The output filename for the CSV (will be saved in ARTIFACTS_DIR)
             
         Returns:
             Dict with status, message, and data containing file info
         """
         try:
+            # Get the artifacts directory path from the environment or use a default
+            artifacts_dir = os.getenv('ARTIFACTS_DIR', os.path.join(os.path.dirname(__file__), '..', 'artifacts'))
+            os.makedirs(artifacts_dir, exist_ok=True)
+            
+            # Ensure filename has .csv extension
+            if not filename.lower().endswith('.csv'):
+                filename = f"{filename}.csv"
+                
+            # Create full path to save the file
+            filepath = os.path.join(artifacts_dir, filename)
+            
             data = json.loads(json_data)
             if not all(k in data for k in ['columns', 'data']):
                 return FailureResponse(
@@ -1967,23 +2018,27 @@ class DataToCsvTool(BaseTool):
 
             # Create and save DataFrame
             df = pd.DataFrame(data['data'], columns=data['columns'])
-            df.to_csv(filename, index=False)
+            df.to_csv(filepath, index=False)
             
             # Verify file was created
-            if not os.path.exists(filename):
+            if not os.path.exists(filepath):
                 return FailureResponse(
                     message="CSV file was not created successfully",
-                    data={"expected_path": os.path.abspath(filename)}
+                    data={"expected_path": filepath}
                 )
+                
+            # Create a web-accessible URL for the file
+            web_path = f"/artifacts/{filename}"
                 
             return SuccessResponse(
                 message=f"Successfully saved data to {filename}",
                 data={
                     "filename": filename,
-                    "absolute_path": os.path.abspath(filename),
+                    "absolute_path": filepath,
+                    "web_path": web_path,
                     "num_rows": len(df),
                     "columns": list(df.columns),
-                    "file_size_bytes": os.path.getsize(filename)
+                    "file_size_bytes": os.path.getsize(filepath)
                 }
             )
             

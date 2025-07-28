@@ -1,5 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
+import ArtifactList from './components/ArtifactList';
+
+type Tab = 'chat' | 'artifacts';
 
 // Generate a simple client ID for WebSocket connection
 const clientId = Math.random().toString(36).substring(2, 15);
@@ -12,6 +15,7 @@ type Message = {
 };
 
 function App() {
+  const [activeTab, setActiveTab] = useState<Tab>('chat');
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isConnected, setIsConnected] = useState(false);
@@ -131,17 +135,10 @@ function App() {
     setInput('');
   };
 
-  return (
-    <div className="min-h-screen bg-gray-100 flex flex-col">
-      <header className="bg-white shadow-sm p-4">
-        <h1 className="text-xl font-semibold text-gray-800">Paper Agent</h1>
-        <div className="flex items-center text-sm text-gray-500 mt-1">
-          <div className={`w-2 h-2 rounded-full mr-2 ${isConnected ? 'bg-green-500' : 'bg-red-500'}`}></div>
-          {isConnected ? 'Connected' : 'Disconnected'}
-        </div>
-      </header>
-
-      <main className="flex-1 p-4 overflow-y-auto">
+  // Render the chat interface
+  const renderChat = () => (
+    <>
+      <div className="flex-1 p-4 overflow-y-auto">
         <div className="max-w-3xl mx-auto space-y-4">
           {messages.map((message) => (
             <div
@@ -175,7 +172,7 @@ function App() {
           )}
           <div ref={messagesEndRef} />
         </div>
-      </main>
+      </div>
 
       <footer className="bg-white border-t p-4">
         <form onSubmit={handleSubmit} className="max-w-3xl mx-auto flex space-x-2">
@@ -196,6 +193,59 @@ function App() {
           </button>
         </form>
       </footer>
+    </>
+  );
+
+  // Render the artifacts interface
+  const renderArtifacts = () => (
+    <div className="flex-1 p-4 overflow-y-auto">
+      <div className="max-w-5xl mx-auto">
+        <ArtifactList />
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-gray-100 flex flex-col">
+      <header className="bg-white shadow-sm">
+        <div className="px-4 py-4">
+          <h1 className="text-xl font-semibold text-gray-800">Paper Agent</h1>
+          <div className="flex items-center text-sm text-gray-500 mt-1">
+            <div className={`w-2 h-2 rounded-full mr-2 ${isConnected ? 'bg-green-500' : 'bg-red-500'}`}></div>
+            {isConnected ? 'Connected' : 'Disconnected'}
+          </div>
+        </div>
+        
+        {/* Tabs */}
+        <div className="border-b border-gray-200">
+          <nav className="-mb-px flex space-x-8 px-4">
+            <button
+              onClick={() => setActiveTab('chat')}
+              className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                activeTab === 'chat'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              Chat
+            </button>
+            <button
+              onClick={() => setActiveTab('artifacts')}
+              className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                activeTab === 'artifacts'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              Artifacts
+            </button>
+          </nav>
+        </div>
+      </header>
+
+      <main className="flex-1 flex flex-col">
+        {activeTab === 'chat' ? renderChat() : renderArtifacts()}
+      </main>
     </div>
   )
 }
