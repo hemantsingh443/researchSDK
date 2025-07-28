@@ -82,8 +82,7 @@ def get_tools(kb: KnowledgeBase, extractor: Extractor, ingestor: Ingestor, llm: 
         PaperSummarizationTool(kb=kb, extractor=extractor, llm=llm),
         KeywordExtractionTool(kb=kb, extractor=extractor, llm=llm),
         LiteratureGapTool(kb=kb, extractor=extractor, llm=llm),
-        # Temporarily disabled until we have a working Neo4j graph connection
-        # CitationAnalysisTool(graph=graph, paper_id="default_paper_id")
+        CitationAnalysisTool(graph=graph, paper_id="default_paper_id")
     ]
     
     # Data extraction and processing tools
