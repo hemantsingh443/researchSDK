@@ -404,3 +404,45 @@ class KnowledgeBase:
             n_results=n_results
         )
         return results
+
+    def get_paper_by_id(self, paper_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve a paper by its ID from the knowledge base.
+
+        Args:
+            paper_id: The ID of the paper to retrieve.
+
+        Returns:
+            A dictionary containing the paper data, or None if not found.
+        """
+        try:
+            # Search for chunks belonging to this paper
+            results = self.collection.get(
+                where={"paper_id": paper_id}
+            )
+            
+            if not results or not results.get('ids'):
+                return None
+            
+            # Combine chunks into a single paper representation
+            paper_data = {
+                "paper_id": paper_id,
+                "title": "",
+                "content": "",
+                "metadata": {}
+            }
+            
+            # Extract information from the first chunk
+            if results.get('metadatas') and len(results['metadatas']) > 0:
+                first_metadata = results['metadatas'][0]
+                paper_data["title"] = first_metadata.get("title", "")
+                paper_data["metadata"] = first_metadata
+            
+            # Combine content from all chunks
+            if results.get('documents'):
+                paper_data["content"] = "\n\n".join(results['documents'])
+            
+            return paper_data
+        except Exception as e:
+            logger.error(f"Error retrieving paper {paper_id}: {e}")
+            return None

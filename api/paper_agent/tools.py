@@ -2298,11 +2298,12 @@ class LiteratureGapTool(BaseTool):
     max_papers: int = 10  # Maximum number of papers to analyze
     min_papers: int = 2   # Minimum number of papers needed for meaningful analysis
 
-    def _run(self, topic: str, num_papers_to_analyze: int = 5) -> Dict[str, Any]:
+    def _run(self, paper_ids: List[str], query: Optional[str] = None, num_papers_to_analyze: int = 5) -> Dict[str, Any]:
         """Analyze papers on a topic to find research gaps and opportunities.
         
         Args:
-            topic: The research topic to analyze
+            paper_ids: List of paper IDs to analyze for gaps
+            query: Optional query to focus the gap analysis
             num_papers_to_analyze: Number of top papers to include in the analysis
             
         Returns:
@@ -2312,43 +2313,63 @@ class LiteratureGapTool(BaseTool):
         num_papers_to_analyze = min(max(self.min_papers, num_papers_to_analyze), self.max_papers)
         
         try:
-            # Search for relevant papers
-            search_results = self.kb.search(query=topic, n_results=num_papers_to_analyze)
-            
-            if not search_results or not search_results.get('documents'):
-                return FailureResponse(
-                    message=f"No papers found on topic: {topic}",
-                    data={"topic": topic, "num_papers_searched": num_papers_to_analyze}
-                )
-            
-            # Check if we have enough papers for meaningful analysis
-            if len(search_results['documents']) < self.min_papers:
-                return FailureResponse(
-                    message=f"Found only {len(search_results['documents'])} papers, but need at least {self.min_papers} for analysis.",
-                    data={
-                        "topic": topic,
-                        "papers_found": len(search_results['documents']),
-                        "min_papers_required": self.min_papers
-                    }
-                )
-            
-            # Prepare paper data for analysis
-            papers_data = []
-            for i, doc in enumerate(search_results['documents']):
-                papers_data.append({
-                    "paper_id": search_results['ids'][i],
-                    "title": doc.get('title', f'Paper {i+1}'),
-                    "content": doc.get('content', '')[:2000],  # Limit content length
-                    "metadata": search_results['metadatas'][i] if 'metadatas' in search_results and i < len(search_results['metadatas']) else {}
-                })
+            # If paper_ids are provided, retrieve those papers directly
+            if paper_ids:
+                # Get papers by IDs from knowledge base
+                papers_data = []
+                for paper_id in paper_ids[:num_papers_to_analyze]:  # Limit to num_papers_to_analyze
+                    paper = self.kb.get_paper_by_id(paper_id)
+                    if paper:
+                        papers_data.append({
+                            "paper_id": paper_id,
+                            "title": paper.get('title', f'Paper {paper_id}'),
+                            "content": paper.get('content', '')[:2000],  # Limit content length
+                            "metadata": paper.get('metadata', {})
+                        })
+                
+                if not papers_data:
+                    return FailureResponse(
+                        message="No valid papers found for the provided IDs.",
+                        data={"paper_ids": paper_ids}
+                    )
+            else:
+                # Search for relevant papers using query
+                search_results = self.kb.search(query=query or "research", n_results=num_papers_to_analyze)
+                
+                if not search_results or not search_results.get('documents'):
+                    return FailureResponse(
+                        message=f"No papers found on topic: {query}",
+                        data={"topic": query, "num_papers_searched": num_papers_to_analyze}
+                    )
+                
+                # Check if we have enough papers for meaningful analysis
+                if len(search_results['documents']) < self.min_papers:
+                    return FailureResponse(
+                        message=f"Found only {len(search_results['documents'])} papers, but need at least {self.min_papers} for analysis.",
+                        data={
+                            "topic": query,
+                            "papers_found": len(search_results['documents']),
+                            "min_papers_required": self.min_papers
+                        }
+                    )
+                
+                # Prepare paper data for analysis
+                papers_data = []
+                for i, doc in enumerate(search_results['documents']):
+                    papers_data.append({
+                        "paper_id": search_results['ids'][i],
+                        "title": doc.get('title', f'Paper {i+1}'),
+                        "content": doc.get('content', '')[:2000],  # Limit content length
+                        "metadata": search_results['metadatas'][i] if 'metadatas' in search_results and i < len(search_results['metadatas']) else {}
+                    })
             
             # Generate structured analysis
-            analysis = self._analyze_papers(topic, papers_data)
+            analysis = self._analyze_papers(query or "research", papers_data)
             
             return SuccessResponse(
-                message=f"Analysis completed for {len(papers_data)} papers on topic: {topic}",
+                message=f"Analysis completed for {len(papers_data)} papers on topic: {query}",
                 data={
-                    "topic": topic,
+                    "topic": query,
                     "papers_analyzed": [{"id": p["paper_id"], "title": p["title"]} for p in papers_data],
                     "analysis": analysis,
                     "timestamp": datetime.datetime.utcnow().isoformat()
