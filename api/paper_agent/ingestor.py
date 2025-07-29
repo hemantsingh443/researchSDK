@@ -89,19 +89,17 @@ class Ingestor:
         for result in results:
             print(f"\n--- Processing arXiv paper: {result.title} ---")
             try:
-                pdf_path = result.download_pdf()
-                print(f"Downloaded to: {pdf_path}")
-                
+                # Create artifacts directory if it doesn't exist
                 artifacts_dir = "artifacts"
                 if not os.path.exists(artifacts_dir):
                     os.makedirs(artifacts_dir)
-                if pdf_path and os.path.exists(pdf_path):
-                    dest_path = os.path.join(artifacts_dir, os.path.basename(pdf_path))
-                    try:
-                        shutil.copy(pdf_path, dest_path)
-                        print(f"Copied PDF to artifacts: {dest_path}")
-                    except Exception as copy_exc:
-                        print(f"!! Failed to copy PDF to artifacts: {copy_exc}")
+                
+                # Download PDF directly to artifacts directory
+                pdf_filename = f"{result.get_short_id()}.{result.title.replace(' ', '_').replace('/', '_')[:50]}.pdf"
+                pdf_path = result.download_pdf(dirpath=artifacts_dir, filename=pdf_filename)
+                print(f"Downloaded to: {pdf_path}")
+                
+                dest_path = pdf_path
                 
                 arxiv_metadata = {
                     "paper_id": result.entry_id,

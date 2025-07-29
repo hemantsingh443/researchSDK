@@ -42,32 +42,9 @@ app.add_middleware(
     max_age=600,  # 10 minutes
 )
 
-# WebSocket manager
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: Dict[str, WebSocket] = {}
-
-    async def connect(self, websocket: WebSocket, client_id: str):
-        await websocket.accept()
-        self.active_connections[client_id] = websocket
-
-    def disconnect(self, client_id: str):
-        if client_id in self.active_connections:
-            del self.active_connections[client_id]
-
-    async def send_message(self, message: str, client_id: str):
-        if client_id in self.active_connections:
-            await self.active_connections[client_id].send_text(message)
-
-manager = ConnectionManager()
-
-# API routes will be defined below
-
 # Ensure artifacts directory exists
 ARTIFACTS_DIR = os.path.join(os.path.dirname(__file__), "artifacts")
 os.makedirs(ARTIFACTS_DIR, exist_ok=True)
-
-# WebSocket connection manager
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
@@ -86,6 +63,7 @@ class ConnectionManager:
         if client_id in self.active_connections:
             websocket = self.active_connections[client_id]
             if websocket.client_state == WebSocketState.CONNECTED:
+                print(f"Sending message to client {client_id}: {message}")
                 await websocket.send_json(message)
 
 manager = ConnectionManager()
@@ -132,12 +110,14 @@ async def execute_query(request: QueryRequest):
         
         # Process the query using the Master Agent
         print("--- Starting Master Agent execution...")
-        result = await agent.run_agent(
-            user_input=request.query,
-            report_type="detailed",
-            max_iterations=20,
-            temperature=0.3
-        )
+        final_report, thought_process = await agent.run(request.query)
+        
+        # Format the result to match expected structure
+        result = {
+            "final_answer": final_report,
+            "thought_process": thought_process,
+            "artifacts": []
+        }
         
         if not result or not result.get("final_answer"):
             raise HTTPException(status_code=500, detail="Agent execution failed or returned no result")
@@ -286,8 +266,17 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str = None):
                                 }
                             }, client_id)
                             
-                            # Execute the query
-                            final_report, thought_process = master_agent.run(query)
+                            # Create a callback function to send messages via WebSocket
+                            async def websocket_callback(message):
+                                try:
+                                    print(f"Processing callback message: {message}")
+                                    # Forward all real-time messages directly to the frontend
+                                    await manager.send_message(message, client_id)
+                                except Exception as e:
+                                    print(f"Error sending WebSocket message: {e}")
+                            
+                            # Execute the query with the callback
+                            final_report, thought_process = await master_agent.run(query, websocket_callback=websocket_callback)
                             
                             # Send completion message with results
                             await manager.send_message({
@@ -357,13 +346,24 @@ async def websocket_endpoint_with_id(websocket: WebSocket, client_id: str):
                             }
                         }, client_id)
                         
-                        # Run the agent asynchronously
-                        result = await agent.run_agent(
-                            user_input=query_content,
-                            report_type="detailed",
-                            max_iterations=20,
-                            temperature=0.3
+                        # Create a callback function to send messages via WebSocket
+                        async def websocket_callback(message):
+                            try:
+                                await manager.send_message(message, client_id)
+                            except Exception as e:
+                                print(f"Error sending WebSocket message: {e}")
+                        
+                        # Run the agent with the callback
+                        final_report, thought_process = await agent.run(
+                            query_content,
+                            websocket_callback=websocket_callback
                         )
+                        
+                        # Format the result to match expected structure
+                        result = {
+                            "final_answer": final_report,
+                            "thought_process": thought_process
+                        }
                         
                         if result and result.get("final_answer"):
                             response = {

@@ -56,6 +56,7 @@ function App() {
 
     ws.current.onmessage = (event) => {
       console.log('WebSocket message received:', event.data);
+      console.log('Parsed message data:', JSON.parse(event.data));
       try {
         const data = JSON.parse(event.data);
         
@@ -65,6 +66,7 @@ function App() {
             addMessage(data.step.content, 'bot');
           } else if (data.status === 'completed' && data.result) {
             addMessage(data.result, 'bot');
+            setIsLoading(false);
             // You could also handle artifacts here if needed
           } else if (data.artifacts && data.artifacts.length > 0) {
             // Handle any artifacts if needed
@@ -75,6 +77,28 @@ function App() {
         } else if (data.type === 'error') {
           addMessage(`Error: ${data.error || data.message || 'Unknown error'}`, 'bot');
           setIsLoading(false);
+        } else if (data.type === 'loop_start') {
+          addMessage(`🔄 Loop ${data.loop}/${data.max_loops} started`, 'bot');
+        } else if (data.type === 'loop_thinking') {
+          addMessage(`🤔 ${data.message}`, 'bot');
+        } else if (data.type === 'loop_thought') {
+          addMessage(`💭 Thought: ${data.thought}`, 'bot');
+          if (data.action && data.action.name) {
+            addMessage(`🛠️ Action: ${data.action.name}`, 'bot');
+          }
+        } else if (data.type === 'loop_action') {
+          addMessage(`⚙️ ${data.message}`, 'bot');
+        } else if (data.type === 'loop_observation') {
+          addMessage(`📋 Observation: ${data.observation}`, 'bot');
+        } else if (data.type === 'loop_error') {
+          addMessage(`❌ Error: ${data.error}`, 'bot');
+        } else if (data.type === 'loop_final_answer') {
+          addMessage(`✅ ${data.message}`, 'bot');
+        } else if (data.type === 'loop_max_reached') {
+          addMessage(`⏹️ ${data.message}`, 'bot');
+          setIsLoading(false);
+        } else if (data.type === 'loop_final_synthesis') {
+          addMessage(`✍️ ${data.message}`, 'bot');
         } else {
           console.log('Unknown message type:', data);
         }

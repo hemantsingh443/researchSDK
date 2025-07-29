@@ -153,12 +153,21 @@ class AnswerFromPapersTool(BaseTool):
     def _run(self, question: str) -> Dict[str, Any]:
         """Use the tool to answer a question using the knowledge base."""
         try:
+            # Validate inputs
+            if not question or not isinstance(question, str):
+                return FailureResponse(
+                    message="Invalid question: Please provide a non-empty question.",
+                    data={"sources": []}
+                ).dict()
+            
+            print(f"Answering question: '{question}' using knowledge base...")
+            
             # Perform a semantic search
             search_results = self.kb.search(query=question, n_results=5)
             
             if not search_results or not search_results.get('documents') or not search_results['documents'][0]:
                 return FailureResponse(
-                    message="I could not find any relevant information in the knowledge base to answer that question.",
+                    message="I could not find any relevant information in the knowledge base to answer that question. Please try rephrasing your question or add more papers to the knowledge base.",
                     data={"sources": []}
                 ).dict()
             
@@ -168,9 +177,9 @@ class AnswerFromPapersTool(BaseTool):
             for i, doc in enumerate(search_results['documents'][0]):
                 meta = search_results['metadatas'][0][i]
                 source = {
-                    "title": meta.get('title', 'Unknown Title'),
-                    "paper_id": meta.get('paper_id', 'N/A'),
-                    "section": meta.get('section', 'N/A')
+                    "title": str(meta.get('title', 'Unknown Title')),
+                    "paper_id": str(meta.get('paper_id', 'N/A')),
+                    "section": str(meta.get('section', 'N/A'))
                 }
                 sources.append(source)
                 
@@ -191,6 +200,7 @@ class AnswerFromPapersTool(BaseTool):
             
             Answer:"""
             
+            print("Generating answer with LLM...")
             response = self.llm.invoke(prompt)
             answer = response.content if hasattr(response, 'content') else str(response)
             
@@ -203,9 +213,9 @@ class AnswerFromPapersTool(BaseTool):
             ).dict()
             
         except Exception as e:
-            logger.error(f"Error in AnswerFromPapersTool: {e}")
+            logger.error(f"Error in AnswerFromPapersTool: {e}", exc_info=True)
             return FailureResponse(
-                message=f"An error occurred while processing your question: {str(e)}"
+                message=f"An error occurred while processing your question: {str(e)}. Please try rephrasing your question or check if the knowledge base has relevant papers."
             ).dict()
 
     async def _arun(self, question: str) -> str:
@@ -230,27 +240,40 @@ class ArxivSearchTool(BaseTool):
     def _run(self, query: str, max_results: int = 3) -> Dict[str, Any]:
         """Search arXiv for papers and add them to the knowledge base."""
         try:
+            # Validate inputs
+            if not query or not isinstance(query, str):
+                return FailureResponse(
+                    message="Invalid query: Please provide a non-empty search query.",
+                    data={"query": query, "max_results": max_results}
+                ).dict()
+            
+            # Ensure max_results is within reasonable bounds
+            max_results = max(1, min(max_results, 10))  # Limit between 1-10 results
+            
+            print(f"Searching arXiv for '{query}' (max {max_results} results)...")
             papers = self.ingestor.load_from_arxiv(query=query, max_results=max_results)
+            
             if not papers:
                 return FailureResponse(
-                    message=f"No papers were found on arXiv for the query: '{query}'",
+                    message=f"No papers were found on arXiv for the query: '{query}'. Try using more specific search terms or check if the query is spelled correctly.",
                     data={"query": query, "max_results": max_results}
                 ).dict()
             
             # Add papers to the knowledge base
+            print(f"Adding {len(papers)} papers to knowledge base...")
             self.kb.add_papers(papers)
             
             # Prepare the response
-            paper_details = [
-                {
-                    "title": str(paper.title),
-                    "authors": paper.authors,
-                    "published": str(paper.published) if hasattr(paper, 'published') else None,
-                    "arxiv_id": paper.entry_id.split('/')[-1] if hasattr(paper, 'entry_id') else None
-                }
-                for paper in papers
-                if hasattr(paper, 'title')
-            ]
+            paper_details = []
+            for paper in papers:
+                if hasattr(paper, 'title'):
+                    paper_details.append({
+                        "title": str(paper.title),
+                        "authors": [str(author) for author in paper.authors] if hasattr(paper, 'authors') else [],
+                        "published": str(paper.published) if hasattr(paper, 'published') else None,
+                        "arxiv_id": paper.entry_id.split('/')[-1] if hasattr(paper, 'entry_id') else None,
+                        "paper_id": getattr(paper, 'paper_id', None)
+                    })
             
             return SuccessResponse(
                 message=f"Successfully loaded {len(papers)} papers into the knowledge base.",
@@ -262,9 +285,9 @@ class ArxivSearchTool(BaseTool):
             ).dict()
             
         except Exception as e:
-            logger.error(f"Error in ArxivSearchTool: {e}")
+            logger.error(f"Error in ArxivSearchTool: {e}", exc_info=True)
             return FailureResponse(
-                message=f"An error occurred while searching arXiv: {str(e)}",
+                message=f"An error occurred while searching arXiv: {str(e)}. Please try again with a different query or check your internet connection.",
                 data={"query": query, "max_results": max_results}
             ).dict()
 
@@ -290,61 +313,99 @@ class PaperSummarizationTool(BaseTool):
     kb: KnowledgeBase
     extractor: Extractor
 
-    def _run(self, paper_id: str) -> str:
-        """Use the tool."""
-        results = self.kb.collection.get(where={"paper_id": paper_id})
-        
-        if not results or not results.get('documents'):
-            return f"Error: Could not find a paper with ID '{paper_id}' in the knowledge base."
-
-        import shutil, os
-        pdf_filename = None
+    def _run(self, paper_id: str) -> Dict[str, Any]:
+        """Summarize a paper by its ID."""
         try:
-            if os.path.exists(paper_id) and paper_id.endswith('.pdf'):
-                pdf_filename = os.path.basename(paper_id)
-            elif paper_id.startswith('http') and 'arxiv.org' in paper_id:
-                arxiv_id = paper_id.split('/')[-1].split('v')[0]
-                for fname in os.listdir('.'):
-                    if fname.startswith(arxiv_id) and fname.endswith('.pdf'):
-                        pdf_filename = fname
-                        break
-                if not pdf_filename:
+            # Validate inputs
+            if not paper_id or not isinstance(paper_id, str):
+                return FailureResponse(
+                    message="Invalid paper_id: Please provide a valid paper ID.",
+                    data={"paper_id": paper_id}
+                ).dict()
+            
+            print(f"Summarizing paper with ID: {paper_id}")
+            
+            results = self.kb.collection.get(where={"paper_id": paper_id})
+            
+            if not results or not results.get('documents'):
+                return FailureResponse(
+                    message=f"Could not find a paper with ID '{paper_id}' in the knowledge base. Please check the paper ID or add the paper to the knowledge base first.",
+                    data={"paper_id": paper_id}
+                ).dict()
+
+            import shutil, os
+            pdf_filename = None
+            try:
+                if os.path.exists(paper_id) and paper_id.endswith('.pdf'):
+                    pdf_filename = os.path.basename(paper_id)
+                elif paper_id.startswith('http') and 'arxiv.org' in paper_id:
+                    arxiv_id = paper_id.split('/')[-1].split('v')[0]
+                    for fname in os.listdir('.'):
+                        if fname.startswith(arxiv_id) and fname.endswith('.pdf'):
+                            pdf_filename = fname
+                            break
+                    if not pdf_filename:
+                        try:
+                            import arxiv
+                            result = next(arxiv.Search(id_list=[arxiv_id]).results())
+                            pdf_path = result.download_pdf()
+                            pdf_filename = os.path.basename(pdf_path)
+                            print(f"Downloaded missing PDF for artifacts: {pdf_filename}")
+                        except Exception as e:
+                            print(f"Failed to download missing PDF for artifacts: {e}")
+                if pdf_filename:
+                    artifacts_dir = 'artifacts'
+                    dest_path = os.path.join(artifacts_dir, pdf_filename)
                     try:
-                        import arxiv
-                        result = next(arxiv.Search(id_list=[arxiv_id]).results())
-                        pdf_path = result.download_pdf()
-                        pdf_filename = os.path.basename(pdf_path)
-                        print(f"Downloaded missing PDF for artifacts: {pdf_filename}")
+                        if not os.path.exists(artifacts_dir):
+                            os.makedirs(artifacts_dir)
+                        if not os.path.exists(dest_path) and os.path.exists(pdf_filename):
+                            shutil.copy(pdf_filename, dest_path)
+                            print(f"Copied referenced PDF to artifacts: {dest_path}")
                     except Exception as e:
-                        print(f"Failed to download missing PDF for artifacts: {e}")
-            if pdf_filename:
-                artifacts_dir = 'artifacts'
-                dest_path = os.path.join(artifacts_dir, pdf_filename)
-                try:
-                    if not os.path.exists(artifacts_dir):
-                        os.makedirs(artifacts_dir)
-                    if not os.path.exists(dest_path) and os.path.exists(pdf_filename):
-                        shutil.copy(pdf_filename, dest_path)
-                        print(f"Copied referenced PDF to artifacts: {dest_path}")
-                except Exception as e:
-                    print(f"Failed to copy referenced PDF to artifacts: {e}")
+                        print(f"Failed to copy referenced PDF to artifacts: {e}")
+            except Exception as e:
+                print(f"PDF artifact logic error: {e}")
+
+            documents = results.get('documents')
+            if not documents:
+                return FailureResponse(
+                    message=f"Could not find a paper with ID '{paper_id}' in the knowledge base. Please check the paper ID or add the paper to the knowledge base first.",
+                    data={"paper_id": paper_id}
+                ).dict()
+
+            full_text = " ".join([str(doc) for doc in documents])
+            if not full_text.strip():
+                return FailureResponse(
+                    message=f"Found paper with ID '{paper_id}' but it has no content to summarize.",
+                    data={"paper_id": paper_id}
+                ).dict()
+                
+            metadatas = results.get('metadatas')
+            if metadatas and len(metadatas) > 0:
+                raw_title = metadatas[0].get('title', 'Unknown Title')
+                title = str(raw_title) if raw_title is not None else 'Unknown Title'
+            else:
+                title = 'Unknown Title'
+
+            print(f"Generating summary for paper: {title}")
+            summary = self.extractor.summarize_paper_text(full_text, title)
+            
+            return SuccessResponse(
+                message=f"Successfully generated summary for paper: {title}",
+                data={
+                    "paper_id": paper_id,
+                    "title": title,
+                    "summary": summary
+                }
+            ).dict()
+            
         except Exception as e:
-            print(f"PDF artifact logic error: {e}")
-
-        documents = results.get('documents')
-        if not documents:
-            return f"Error: Could not find a paper with ID '{paper_id}' in the knowledge base."
-
-        full_text = " ".join([str(doc) for doc in documents])
-        metadatas = results.get('metadatas')
-        if metadatas and len(metadatas) > 0:
-            raw_title = metadatas[0].get('title', 'Unknown Title')
-            title = str(raw_title) if raw_title is not None else 'Unknown Title'
-        else:
-            title = 'Unknown Title'
-
-        summary = self.extractor.summarize_paper_text(full_text, title)
-        return summary
+            logger.error(f"Error in PaperSummarizationTool: {e}", exc_info=True)
+            return FailureResponse(
+                message=f"An error occurred while summarizing the paper: {str(e)}. Please check the paper ID and try again.",
+                data={"paper_id": paper_id}
+            ).dict()
 
     async def _arun(self, paper_id: str) -> str:
         raise NotImplementedError("This tool does not support async yet.")
@@ -408,6 +469,18 @@ class GetPaperMetadataByTitleTool(BaseTool):
     def _run(self, query: str, max_results: int = 5) -> Dict[str, Any]:
         """Search for papers by title or keywords in the knowledge base."""
         try:
+            # Validate inputs
+            if not query or not isinstance(query, str):
+                return FailureResponse(
+                    message="Invalid query: Please provide a non-empty search query.",
+                    data={"query": query, "max_results": max_results}
+                ).dict()
+            
+            # Ensure max_results is within reasonable bounds
+            max_results = max(1, min(max_results, 10))  # Limit between 1-10 results
+            
+            print(f"Searching knowledge base for papers matching '{query}' (max {max_results} results)...")
+            
             # First try to find matches using vector similarity search
             search_results = self.kb.collection.query(
                 query_texts=[query],
@@ -416,6 +489,7 @@ class GetPaperMetadataByTitleTool(BaseTool):
             )
             
             if not search_results or not search_results.get('metadatas') or not search_results['metadatas'][0]:
+                print("Vector search returned no results, trying local filter...")
                 # Fallback to get all and filter locally if vector search returns nothing
                 all_papers = self.kb.collection.get(
                     limit=100,  # Limit to prevent memory issues
@@ -424,7 +498,7 @@ class GetPaperMetadataByTitleTool(BaseTool):
                 
                 if not all_papers or not all_papers.get('metadatas'):
                     return FailureResponse(
-                        message=f"No papers found in the knowledge base.",
+                        message=f"No papers found in the knowledge base. Please add some papers first using the arxiv_paper_search_and_load tool.",
                         data={"query": query, "max_results": max_results}
                     ).dict()
                 
@@ -444,7 +518,7 @@ class GetPaperMetadataByTitleTool(BaseTool):
                 
                 if not matching_metadatas:
                     return FailureResponse(
-                        message=f"No papers found matching the query: '{query}'",
+                        message=f"No papers found matching the query: '{query}'. Try using different search terms or check if the papers have been added to the knowledge base.",
                         data={"query": query, "max_results": max_results}
                     ).dict()
                 
@@ -462,8 +536,8 @@ class GetPaperMetadataByTitleTool(BaseTool):
                 if paper_id not in unique_papers:
                     unique_papers[paper_id] = {
                         "paper_id": paper_id,
-                        "title": meta.get('title', 'Untitled'),
-                        "authors": meta.get('authors', []),
+                        "title": str(meta.get('title', 'Untitled')),
+                        "authors": [str(author) for author in meta.get('authors', [])],
                         "year": meta.get('year'),
                         "doi": meta.get('doi')
                     }
@@ -483,9 +557,9 @@ class GetPaperMetadataByTitleTool(BaseTool):
             ).dict()
             
         except Exception as e:
-            logger.error(f"Error in GetPaperMetadataByTitleTool: {e}")
+            logger.error(f"Error in GetPaperMetadataByTitleTool: {e}", exc_info=True)
             return FailureResponse(
-                message=f"An error occurred while searching for papers: {str(e)}",
+                message=f"An error occurred while searching for papers: {str(e)}. Please try again or check if the knowledge base has papers.",
                 data={"query": query, "max_results": max_results}
             ).dict()
 
@@ -760,22 +834,45 @@ class TableExtractionTool(BaseTool):
     extractor: Extractor
 
     def _run(self, paper_id: str, topic_of_interest: str) -> Dict[str, Any]:
+        """Extract tables from a paper based on a topic of interest."""
         try:
+            # Validate inputs
+            if not paper_id or not isinstance(paper_id, str):
+                return FailureResponse(
+                    message="Invalid paper_id: Please provide a valid paper ID.",
+                    data={"paper_id": paper_id, "topic_of_interest": topic_of_interest}
+                )
+                
+            if not topic_of_interest or not isinstance(topic_of_interest, str):
+                return FailureResponse(
+                    message="Invalid topic_of_interest: Please provide a valid topic.",
+                    data={"paper_id": paper_id, "topic_of_interest": topic_of_interest}
+                )
+            
+            print(f"Extracting table about '{topic_of_interest}' from paper ID: {paper_id}")
+            
             # Get paper from knowledge base
             results = self.kb.collection.get(where={"paper_id": paper_id})
             if not results or not results.get('documents'):
                 return FailureResponse(
-                    message=f"Could not find paper with ID '{paper_id}' in the knowledge base.",
+                    message=f"Could not find paper with ID '{paper_id}' in the knowledge base. Please check the paper ID or add the paper to the knowledge base first.",
                     data={"paper_id": paper_id}
                 )
             
             # Get paper metadata
-            full_text = " ".join(results['documents'])
+            full_text = " ".join([str(doc) for doc in results['documents']])
+            if not full_text.strip():
+                return FailureResponse(
+                    message=f"Found paper with ID '{paper_id}' but it has no text content to extract tables from.",
+                    data={"paper_id": paper_id}
+                )
+                
             metadatas = results.get('metadatas', [{}])
-            title = metadatas[0].get('title', 'Unknown Title')
+            title = str(metadatas[0].get('title', 'Unknown Title'))
             
             # Try LLM-based extraction first
             try:
+                print(f"Attempting LLM-based table extraction for topic: {topic_of_interest}")
                 json_table_str = self.extractor.extract_table_as_json(full_text, title, topic_of_interest)
                 
                 # Clean and parse the response
@@ -784,11 +881,28 @@ class TableExtractionTool(BaseTool):
                 
                 parsed_data = json.loads(json_table_str)
                 if isinstance(parsed_data, dict) and "columns" in parsed_data and "data" in parsed_data:
-                    return SuccessResponse(
-                        message=f"Successfully extracted table about '{topic_of_interest}' from paper: {title}",
-                        data=parsed_data
-                    )
-                
+                    # Validate the extracted data
+                    columns = parsed_data.get("columns", [])
+                    data = parsed_data.get("data", [])
+                    
+                    if columns and data:
+                        return SuccessResponse(
+                            message=f"Successfully extracted table about '{topic_of_interest}' from paper: {title}",
+                            data={
+                                "columns": [str(col) for col in columns],
+                                "data": [[str(cell) for cell in row] for row in data],
+                                "paper_id": paper_id,
+                                "title": title,
+                                "extraction_method": "llm"
+                            }
+                        )
+                    else:
+                        print("LLM extraction returned empty table data")
+                else:
+                    print("LLM extraction did not return valid table format")
+                    
+            except json.JSONDecodeError as e:
+                print(f"LLM-based table extraction failed to parse JSON: {e}")
             except Exception as e:
                 print(f"LLM-based table extraction failed: {e}")
             
@@ -797,28 +911,46 @@ class TableExtractionTool(BaseTool):
                 import camelot
                 pdf_path = self._find_pdf_path(paper_id)
                 if pdf_path and os.path.exists(pdf_path):
+                    print(f"Attempting PDF-based table extraction from: {pdf_path}")
                     tables = camelot.read_pdf(pdf_path, pages='all')
                     if tables and len(tables) > 0:
                         df = tables[0].df
-                        table_data = {
-                            "columns": list(df.iloc[0]),
-                            "data": df.iloc[1:].values.tolist()
-                        }
-                        return SuccessResponse(
-                            message=f"Extracted table from PDF using Camelot: {title}",
-                            data=table_data
-                        )
+                        if not df.empty:
+                            # Convert to proper format
+                            columns = [str(col) for col in df.iloc[0]]
+                            data = [[str(cell) for cell in row] for row in df.iloc[1:].values.tolist()]
+                            
+                            table_data = {
+                                "columns": columns,
+                                "data": data,
+                                "paper_id": paper_id,
+                                "title": title,
+                                "extraction_method": "pdf_camelot"
+                            }
+                            return SuccessResponse(
+                                message=f"Extracted table from PDF using Camelot: {title}",
+                                data=table_data
+                            )
+                        else:
+                            print("PDF extraction returned empty table")
+                    else:
+                        print("PDF extraction found no tables")
+                else:
+                    print("PDF file not found for extraction")
+            except ImportError as e:
+                print(f"Camelot not installed, PDF extraction unavailable: {e}")
             except Exception as e:
                 print(f"PDF extraction failed: {e}")
             
             return FailureResponse(
-                message=f"Could not extract table about '{topic_of_interest}' from paper: {title}",
+                message=f"Could not extract table about '{topic_of_interest}' from paper: {title}. Both LLM-based and PDF-based extraction methods failed. Please try a different topic or check if the paper contains tables.",
                 data={"paper_id": paper_id, "title": title}
             )
             
         except Exception as e:
+            logger.error(f"Error in TableExtractionTool: {e}", exc_info=True)
             return FailureResponse(
-                message=f"Error extracting table: {str(e)}",
+                message=f"Error extracting table: {str(e)}. Please check the paper ID and try again.",
                 data={"paper_id": paper_id, "error_type": type(e).__name__}
             )
     
@@ -978,28 +1110,52 @@ class CitationAnalysisTool(BaseTool):
             Dict containing analysis results or error information
         """
         # Validate input
+        if not analysis_type or not isinstance(analysis_type, str):
+            return FailureResponse(
+                message="Invalid analysis_type: Please provide a valid analysis type.",
+                data={
+                    "valid_types": ["most_cited", "hottest_papers", "foundational", "paper_network"],
+                    "provided_type": analysis_type,
+                    "paper_id_provided": bool(paper_id)
+                }
+            )
+        
         limit = min(max(1, limit), self.max_results)  # Ensure limit is reasonable
         
         try:
+            print(f"Performing citation analysis: {analysis_type} (limit: {limit})")
+            
             # Check if graph is connected
             if not self._check_graph_connection():
                 return FailureResponse(
-                    message="Failed to connect to the knowledge graph. Please check the connection.",
+                    message="Failed to connect to the knowledge graph. Please check the connection. Make sure Neo4j is running and properly configured.",
                     data={"analysis_type": analysis_type}
                 )
             
             # Route to appropriate analysis method
             if analysis_type == "most_cited":
-                return self._find_most_cited(limit)
+                result = self._find_most_cited(limit)
+                if result.get('status') == 'success' and result.get('data', {}).get('result_count', 0) == 0:
+                    result['message'] += " This may be because no papers have been added to the knowledge base yet, or no citation relationships exist in the graph."
+                return result
             elif analysis_type == "hottest_papers":
-                return self._find_hottest_papers(limit)
+                result = self._find_hottest_papers(limit)
+                if result.get('status') == 'success' and result.get('data', {}).get('result_count', 0) == 0:
+                    result['message'] += " This may be because no papers have been added to the knowledge base yet, or no citation relationships exist in the graph."
+                return result
             elif analysis_type == "foundational":
-                return self._find_foundational_papers(limit)
+                result = self._find_foundational_papers(limit)
+                if result.get('status') == 'success' and result.get('data', {}).get('result_count', 0) == 0:
+                    result['message'] += " This may be because no papers have been added to the knowledge base yet, or no citation relationships exist in the graph."
+                return result
             elif analysis_type == "paper_network" and paper_id:
-                return self._analyze_paper_network(paper_id, limit)
+                result = self._analyze_paper_network(paper_id, limit)
+                if result.get('status') == 'success' and result.get('data', {}).get('result_count', 0) == 0:
+                    result['message'] += " This may be because the specified paper was not found or has no citation relationships in the graph."
+                return result
             else:
                 return FailureResponse(
-                    message=f"Invalid analysis type or missing paper_id: {analysis_type}",
+                    message=f"Invalid analysis type or missing paper_id: {analysis_type}. Valid types are: most_cited, hottest_papers, foundational, paper_network.",
                     data={
                         "valid_types": ["most_cited", "hottest_papers", "foundational", "paper_network"],
                         "provided_type": analysis_type,
@@ -1022,48 +1178,74 @@ class CitationAnalysisTool(BaseTool):
                 error_data["suggestion"] = "Please check your Neo4j connection and try again."
             
             return FailureResponse(
-                message=f"{error_msg}: {str(e)}",
+                message=f"{error_msg}: {str(e)}. Please check your Neo4j connection and try again.",
                 data=error_data
             )
     
     def _check_graph_connection(self, max_retries: int = 2) -> bool:
-        """Check if the graph database is accessible."""
-        try:
-            # Simple query to test connection
-            self.graph.query("RETURN 1 AS test")
-            return True
-        except Exception as e:
-            print(f"Graph connection check failed: {e}")
-            return False
+        """Check if the graph database is accessible with retry logic."""
+        for attempt in range(max_retries + 1):
+            try:
+                # Simple query to test connection
+                self.graph.query("RETURN 1 AS test")
+                print("Graph connection successful")
+                return True
+            except Exception as e:
+                logger.warning(f"Graph connection check failed (attempt {attempt + 1}/{max_retries + 1}): {e}")
+                if attempt < max_retries:
+                    import time
+                    time.sleep(1)  # Brief delay before retry
+                else:
+                    logger.error(f"Graph connection failed after {max_retries + 1} attempts: {e}")
+                    print(f"Graph connection failed after {max_retries + 1} attempts. Please check if Neo4j is running and properly configured.")
+        return False
             
     def _find_most_cited(self, limit: int) -> Dict[str, Any]:
         """Find the most cited papers in the knowledge graph."""
-        query = """
-        MATCH (p:Paper)<-[:CITES]-(cited_by)
-        WITH p, count(cited_by) AS citation_count
-        RETURN p.title AS title, 
-               p.year AS year,
-               p.authors AS authors,
-               citation_count
-        ORDER BY citation_count DESC
-        LIMIT $limit
-        """
-        result = self.graph.query(query, params={"limit": limit})
-        
-        if not result:
+        try:
+            query = """
+            MATCH (p:Paper)<-[:CITES]-(cited_by)
+            WITH p, count(cited_by) AS citation_count
+            RETURN p.title AS title, 
+                   p.year AS year,
+                   p.authors AS authors,
+                   citation_count
+            ORDER BY citation_count DESC
+            LIMIT $limit
+            """
+            result = self.graph.query(query, params={"limit": limit})
+            
+            if not result:
+                return SuccessResponse(
+                    message="No citation data found in the knowledge graph.",
+                    data={"result_count": 0}
+                )
+                
+            # Process results to ensure proper data types
+            processed_papers = []
+            for paper in result:
+                processed_paper = {
+                    "title": str(paper.get('title', 'Unknown Title')),
+                    "year": paper.get('year'),
+                    "authors": [str(author) for author in paper.get('authors', [])] if paper.get('authors') else [],
+                    "citation_count": paper.get('citation_count', 0)
+                }
+                processed_papers.append(processed_paper)
+                
             return SuccessResponse(
-                message="No citation data found in the knowledge graph.",
+                message=f"Found {len(result)} most cited papers.",
+                data={
+                    "analysis_type": "most_cited",
+                    "papers": processed_papers,
+                    "result_count": len(result)
+                }
+            )
+        except Exception as e:
+            logger.error(f"Error in _find_most_cited: {e}", exc_info=True)
+            return FailureResponse(
+                message=f"Error finding most cited papers: {str(e)}",
                 data={"result_count": 0}
             )
-            
-        return SuccessResponse(
-            message=f"Found {len(result)} most cited papers.",
-            data={
-                "analysis_type": "most_cited",
-                "papers": [dict(paper) for paper in result],
-                "result_count": len(result)
-            }
-        )
         
     def _find_hottest_papers(self, limit: int) -> Dict[str, Any]:
         """Find papers with the most outgoing references."""
@@ -1323,24 +1505,155 @@ class PlotGenerationTool(BaseTool):
     description: str = "Use this tool to generate a plot from structured JSON data and save it as an image file."
     args_schema: Type[PlottingInput] = PlottingInput
 
-    def _run(self, json_data: str, chart_type: str, title: str, filename: str) -> str:
-        try:
-            if not filename.startswith("artifacts/"):
-                filename = f"artifacts/{filename}"
-            data = json.loads(json_data)
-            df = pd.DataFrame(data['data'], columns=data['columns'])
-
-            df.set_index(df.columns[0], inplace=True)
+    def _run(self, json_data: str, chart_type: str, title: str, filename: str) -> Dict[str, Any]:
+        """Generate a plot from JSON data and save it to a file.
+        
+        Args:
+            json_data: JSON string with 'columns' and 'data' keys
+            chart_type: Type of chart to generate (e.g., 'line', 'bar', 'scatter')
+            title: Title for the plot
+            filename: Output filename for the plot
             
-            ax = df.plot(kind=chart_type, title=title, figsize=(10, 6))
-            plt.ylabel("Value")
-            plt.xticks(rotation=45, ha='right')
-            plt.tight_layout()
-            plt.savefig(filename)
-            plt.close()
-            return f"Successfully generated and saved plot to '{filename}'."
+        Returns:
+            Dict containing success/failure status and detailed information
+        """
+        # Validate inputs
+        if not json_data or not isinstance(json_data, str):
+            return FailureResponse(
+                message="Invalid json_data: Please provide valid JSON data with 'columns' and 'data' keys.",
+                data={"chart_type": chart_type, "title": title, "filename": filename}
+            )
+            
+        if not chart_type or not isinstance(chart_type, str):
+            return FailureResponse(
+                message="Invalid chart_type: Please provide a valid chart type (e.g., 'line', 'bar', 'scatter').",
+                data={"chart_type": chart_type, "title": title, "filename": filename}
+            )
+            
+        if not title or not isinstance(title, str):
+            return FailureResponse(
+                message="Invalid title: Please provide a valid title for the plot.",
+                data={"chart_type": chart_type, "title": title, "filename": filename}
+            )
+            
+        if not filename or not isinstance(filename, str):
+            return FailureResponse(
+                message="Invalid filename: Please provide a valid filename for the plot.",
+                data={"chart_type": chart_type, "title": title, "filename": filename}
+            )
+        
+        try:
+            print(f"Generating {chart_type} plot with title: {title}")
+            
+            # Ensure artifacts directory exists
+            artifacts_dir = os.getenv('ARTIFACTS_DIR', 'artifacts')
+            os.makedirs(artifacts_dir, exist_ok=True)
+            
+            # Ensure filename is in artifacts directory
+            if not filename.startswith(artifacts_dir + os.sep):
+                filename = os.path.join(artifacts_dir, filename)
+            
+            # Parse JSON data
+            try:
+                data = json.loads(json_data)
+            except json.JSONDecodeError as e:
+                return FailureResponse(
+                    message=f"Invalid JSON data: {str(e)}",
+                    data={
+                        "error_type": "JSONDecodeError",
+                        "chart_type": chart_type, 
+                        "title": title, 
+                        "filename": filename
+                    }
+                )
+            
+            # Validate data structure
+            if not isinstance(data, dict) or 'columns' not in data or 'data' not in data:
+                return FailureResponse(
+                    message="Invalid data format: Expected JSON with 'columns' and 'data' keys.",
+                    data={
+                        "received_keys": list(data.keys()) if isinstance(data, dict) else "Invalid JSON",
+                        "chart_type": chart_type, 
+                        "title": title, 
+                        "filename": filename
+                    }
+                )
+            
+            # Create DataFrame
+            try:
+                df = pd.DataFrame(data['data'], columns=data['columns'])
+                if df.empty:
+                    return FailureResponse(
+                        message="Empty data: No data provided to plot.",
+                        data={"chart_type": chart_type, "title": title, "filename": filename}
+                    )
+            except Exception as e:
+                return FailureResponse(
+                    message=f"Error creating DataFrame: {str(e)}",
+                    data={
+                        "error_type": type(e).__name__,
+                        "chart_type": chart_type, 
+                        "title": title, 
+                        "filename": filename
+                    }
+                )
+            
+            # Generate plot
+            try:
+                # Set index for plotting
+                if len(df.columns) > 0:
+                    df.set_index(df.columns[0], inplace=True)
+                
+                # Create plot
+                ax = df.plot(kind=chart_type, title=title, figsize=(10, 6))
+                plt.ylabel("Value")
+                plt.xticks(rotation=45, ha='right')
+                plt.tight_layout()
+                
+                # Save plot
+                plt.savefig(filename)
+                plt.close()
+                
+                # Create web-accessible path
+                web_path = f"/artifacts/{os.path.basename(filename)}"
+                
+                return SuccessResponse(
+                    message=f"Successfully generated and saved {chart_type} plot to '{filename}'.",
+                    data={
+                        "output_path": filename,
+                        "web_path": web_path,
+                        "filename": os.path.basename(filename),
+                        "chart_type": chart_type,
+                        "title": title,
+                        "num_data_points": len(df),
+                        "columns": list(df.columns)
+                    }
+                )
+                
+            except Exception as e:
+                # Clean up any partially created plot
+                plt.close()
+                return FailureResponse(
+                    message=f"Error generating plot: {str(e)}",
+                    data={
+                        "error_type": type(e).__name__,
+                        "chart_type": chart_type, 
+                        "title": title, 
+                        "filename": filename
+                    }
+                )
+                
         except Exception as e:
-            return f"Error generating plot: {e}"
+            logger.error(f"Error in PlotGenerationTool: {e}", exc_info=True)
+            return FailureResponse(
+                message=f"Unexpected error generating plot: {str(e)}",
+                data={
+                    "error_type": type(e).__name__,
+                    "chart_type": chart_type, 
+                    "title": title, 
+                    "filename": filename
+                }
+            )
 
 class SmartPlottingInput(BaseModel):
     json_data: str = Field(description="A JSON string with 'columns' and 'data' keys.")
@@ -1357,44 +1670,193 @@ class SmartPlotGenerationTool(BaseTool):
     )
     args_schema: Type[SmartPlottingInput] = SmartPlottingInput
 
-    def _run(self, json_data: str, title: str, filename: str, analysis_goal: str) -> str:
+    def _run(self, json_data: str, title: str, filename: str, analysis_goal: str) -> Dict[str, Any]:
+        """Generate an insightful plot from JSON data based on an analysis goal and save it to a file.
+        
+        Args:
+            json_data: JSON string with 'columns' and 'data' keys
+            title: Title for the plot
+            filename: Output filename for the plot
+            analysis_goal: Description of what to analyze/visualize
+            
+        Returns:
+            Dict containing success/failure status and detailed information
+        """
+        # Validate inputs
+        if not json_data or not isinstance(json_data, str):
+            return FailureResponse(
+                message="Invalid json_data: Please provide valid JSON data with 'columns' and 'data' keys.",
+                data={"title": title, "filename": filename, "analysis_goal": analysis_goal}
+            )
+            
+        if not title or not isinstance(title, str):
+            return FailureResponse(
+                message="Invalid title: Please provide a valid title for the plot.",
+                data={"title": title, "filename": filename, "analysis_goal": analysis_goal}
+            )
+            
+        if not filename or not isinstance(filename, str):
+            return FailureResponse(
+                message="Invalid filename: Please provide a valid filename for the plot.",
+                data={"title": title, "filename": filename, "analysis_goal": analysis_goal}
+            )
+            
+        if not analysis_goal or not isinstance(analysis_goal, str):
+            return FailureResponse(
+                message="Invalid analysis_goal: Please provide a valid analysis goal.",
+                data={"title": title, "filename": filename, "analysis_goal": analysis_goal}
+            )
+        
         try:
-            if not filename.startswith("artifacts/"):
-                filename = f"artifacts/{filename}"
-            data = json.loads(json_data)
-            df = pd.DataFrame(data['data'], columns=data['columns'])
-            df.set_index(df.columns[0], inplace=True)
+            print(f"Generating smart plot with title: {title} for goal: {analysis_goal}")
             
-            numeric_cols = df.select_dtypes(include=np.number).columns
-            if len(numeric_cols) > 1:
-                max_vals = df[numeric_cols].max()
-                if max_vals.max() / max_vals.min() > 10:
-                    fig, ax1 = plt.subplots(figsize=(12, 7))
-                    ax2 = ax1.twinx() # Create a second y-axis
-                    
-                    largest_col = max_vals.idxmax()
-                    other_cols = [c for c in numeric_cols if c != largest_col]
-                    
-                    df[other_cols].plot(kind='bar', ax=ax1, position=0, width=0.4)
-                    df[[largest_col]].plot(kind='bar', ax=ax2, color='red', position=1, width=0.4)
-
-                    ax1.set_ylabel('Error Metrics')
-                    ax2.set_ylabel(str(largest_col), color='red')
-                    ax1.set_title(title)
-                    fig.legend(loc="upper right", bbox_to_anchor=(1,1), bbox_transform=ax1.transAxes)
-
-                else: # All values are on a similar scale
-                    df.plot(kind='bar', title=title, figsize=(10, 6), rot=45)
-            else: # Only one numeric column
-                df.plot(kind='bar', title=title, figsize=(10, 6), rot=45)
+            # Ensure artifacts directory exists
+            artifacts_dir = os.getenv('ARTIFACTS_DIR', 'artifacts')
+            os.makedirs(artifacts_dir, exist_ok=True)
             
-            plt.tight_layout()
-            plt.savefig(filename)
-            plt.close()
-            return f"Successfully generated an insightful plot and saved it to '{filename}'."
+            # Ensure filename is in artifacts directory
+            if not filename.startswith(artifacts_dir + os.sep):
+                filename = os.path.join(artifacts_dir, filename)
+            
+            # Parse JSON data
+            try:
+                data = json.loads(json_data)
+            except json.JSONDecodeError as e:
+                return FailureResponse(
+                    message=f"Invalid JSON data: {str(e)}",
+                    data={
+                        "error_type": "JSONDecodeError",
+                        "title": title, 
+                        "filename": filename, 
+                        "analysis_goal": analysis_goal
+                    }
+                )
+            
+            # Validate data structure
+            if not isinstance(data, dict) or 'columns' not in data or 'data' not in data:
+                return FailureResponse(
+                    message="Invalid data format: Expected JSON with 'columns' and 'data' keys.",
+                    data={
+                        "received_keys": list(data.keys()) if isinstance(data, dict) else "Invalid JSON",
+                        "title": title, 
+                        "filename": filename, 
+                        "analysis_goal": analysis_goal
+                    }
+                )
+            
+            # Create DataFrame
+            try:
+                df = pd.DataFrame(data['data'], columns=data['columns'])
+                if df.empty:
+                    return FailureResponse(
+                        message="Empty data: No data provided to plot.",
+                        data={"title": title, "filename": filename, "analysis_goal": analysis_goal}
+                    )
+                
+                # Set index for plotting
+                if len(df.columns) > 0:
+                    df.set_index(df.columns[0], inplace=True)
+                    
+            except Exception as e:
+                return FailureResponse(
+                    message=f"Error creating DataFrame: {str(e)}",
+                    data={
+                        "error_type": type(e).__name__,
+                        "title": title, 
+                        "filename": filename, 
+                        "analysis_goal": analysis_goal
+                    }
+                )
+            
+            # Generate smart plot
+            try:
+                numeric_cols = df.select_dtypes(include=np.number).columns
+                
+                if len(numeric_cols) == 0:
+                    return FailureResponse(
+                        message="No numeric columns found in data. Cannot generate plot.",
+                        data={
+                            "columns": list(df.columns),
+                            "numeric_columns": list(numeric_cols),
+                            "title": title, 
+                            "filename": filename, 
+                            "analysis_goal": analysis_goal
+                        }
+                    )
+                
+                if len(numeric_cols) > 1:
+                    max_vals = df[numeric_cols].max()
+                    if len(max_vals) > 1 and max_vals.max() / max_vals.min() > 10:
+                        # Use dual axis for data with very different scales
+                        fig, ax1 = plt.subplots(figsize=(12, 7))
+                        ax2 = ax1.twinx() # Create a second y-axis
+                        
+                        largest_col = max_vals.idxmax()
+                        other_cols = [c for c in numeric_cols if c != largest_col]
+                        
+                        df[other_cols].plot(kind='bar', ax=ax1, position=0, width=0.4)
+                        df[[largest_col]].plot(kind='bar', ax=ax2, color='red', position=1, width=0.4)
 
+                        ax1.set_ylabel('Error Metrics')
+                        ax2.set_ylabel(str(largest_col), color='red')
+                        ax1.set_title(title)
+                        fig.legend(loc="upper right", bbox_to_anchor=(1,1), bbox_transform=ax1.transAxes)
+                        
+                        plot_type = "dual_axis_bar"
+
+                    else: # All values are on a similar scale
+                        df[numeric_cols].plot(kind='bar', title=title, figsize=(10, 6), rot=45)
+                        plot_type = "single_axis_bar"
+                else: # Only one numeric column
+                    df[numeric_cols[0]].plot(kind='bar', title=title, figsize=(10, 6), rot=45)
+                    plot_type = "single_column_bar"
+                
+                plt.tight_layout()
+                plt.savefig(filename)
+                plt.close()
+                
+                # Create web-accessible path
+                web_path = f"/artifacts/{os.path.basename(filename)}"
+                
+                return SuccessResponse(
+                    message=f"Successfully generated an insightful {plot_type} plot and saved it to '{filename}'.",
+                    data={
+                        "output_path": filename,
+                        "web_path": web_path,
+                        "filename": os.path.basename(filename),
+                        "plot_type": plot_type,
+                        "title": title,
+                        "analysis_goal": analysis_goal,
+                        "num_data_points": len(df),
+                        "numeric_columns": list(numeric_cols),
+                        "total_columns": len(df.columns)
+                    }
+                )
+                
+            except Exception as e:
+                # Clean up any partially created plot
+                plt.close()
+                return FailureResponse(
+                    message=f"Error generating smart plot: {str(e)}",
+                    data={
+                        "error_type": type(e).__name__,
+                        "title": title, 
+                        "filename": filename, 
+                        "analysis_goal": analysis_goal
+                    }
+                )
+                
         except Exception as e:
-            return f"Error generating smart plot: {e}"
+            logger.error(f"Error in SmartPlotGenerationTool: {e}", exc_info=True)
+            return FailureResponse(
+                message=f"Unexpected error generating smart plot: {str(e)}",
+                data={
+                    "error_type": type(e).__name__,
+                    "title": title, 
+                    "filename": filename, 
+                    "analysis_goal": analysis_goal
+                }
+            )
 
 class DynamicVisualizationInput(BaseModel):
     json_data: str = Field(description="A JSON string with 'columns' and 'data' keys, representing the data to be visualized.")
@@ -1696,29 +2158,119 @@ class ConflictingResultsTool(BaseTool):
     kb: KnowledgeBase
     extractor: Extractor # Uses an LLM for the analysis
 
-    def _run(self, paper_a_id: str, paper_b_id: str, topic: str) -> str:
+    def _run(self, paper_a_id: str, paper_b_id: str, topic: str) -> Dict[str, Any]:
+        """Analyze two papers to find conflicting results on a specific topic.
+        
+        Args:
+            paper_a_id: ID of the first paper
+            paper_b_id: ID of the second paper
+            topic: The specific topic to analyze for conflicts
+            
+        Returns:
+            Dict containing the analysis results or error information
+        """
+        # Validate inputs
+        if not paper_a_id or not isinstance(paper_a_id, str):
+            return FailureResponse(
+                message="Invalid paper_a_id: Please provide a valid paper ID for the first paper.",
+                data={"paper_a_id": paper_a_id, "paper_b_id": paper_b_id, "topic": topic}
+            )
+            
+        if not paper_b_id or not isinstance(paper_b_id, str):
+            return FailureResponse(
+                message="Invalid paper_b_id: Please provide a valid paper ID for the second paper.",
+                data={"paper_a_id": paper_a_id, "paper_b_id": paper_b_id, "topic": topic}
+            )
+            
+        if not topic or not isinstance(topic, str):
+            return FailureResponse(
+                message="Invalid topic: Please provide a valid topic to analyze for conflicts.",
+                data={"paper_a_id": paper_a_id, "paper_b_id": paper_b_id, "topic": topic}
+            )
+        
         try:
+            print(f"Analyzing conflicting results between papers {paper_a_id} and {paper_b_id} on topic: {topic}")
+            
+            # Retrieve papers from knowledge base
             result_a = self.kb.collection.get(where={"paper_id": paper_a_id})
             result_b = self.kb.collection.get(where={"paper_id": paper_b_id})
+            
+            # Process first paper
             documents_a = (result_a['documents'] if result_a and result_a.get('documents') else []) or []
+            if not documents_a:
+                return FailureResponse(
+                    message=f"Could not find paper with ID '{paper_a_id}' in the knowledge base. Please verify the paper ID or add the paper to the knowledge base first.",
+                    data={"paper_a_id": paper_a_id, "paper_b_id": paper_b_id, "topic": topic}
+                )
+                
             text_a = " ".join(str(doc) for doc in documents_a if doc is not None)
+            if not text_a.strip():
+                return FailureResponse(
+                    message=f"Paper with ID '{paper_a_id}' has no text content to analyze.",
+                    data={"paper_a_id": paper_a_id, "paper_b_id": paper_b_id, "topic": topic}
+                )
+                
             metadatas_a = (result_a['metadatas'] if result_a and result_a.get('metadatas') else []) or []
             meta_a = metadatas_a[0] if metadatas_a else {}
             title_a = str(meta_a.get('title')) if meta_a.get('title') is not None else str(paper_a_id)
-
+            
+            # Process second paper
             documents_b = (result_b['documents'] if result_b and result_b.get('documents') else []) or []
+            if not documents_b:
+                return FailureResponse(
+                    message=f"Could not find paper with ID '{paper_b_id}' in the knowledge base. Please verify the paper ID or add the paper to the knowledge base first.",
+                    data={"paper_a_id": paper_a_id, "paper_b_id": paper_b_id, "topic": topic}
+                )
+                
             text_b = " ".join(str(doc) for doc in documents_b if doc is not None)
+            if not text_b.strip():
+                return FailureResponse(
+                    message=f"Paper with ID '{paper_b_id}' has no text content to analyze.",
+                    data={"paper_a_id": paper_a_id, "paper_b_id": paper_b_id, "topic": topic}
+                )
+                
             metadatas_b = (result_b['metadatas'] if result_b and result_b.get('metadatas') else []) or []
             meta_b = metadatas_b[0] if metadatas_b else {}
             title_b = str(meta_b.get('title')) if meta_b.get('title') is not None else str(paper_b_id)
-        except (IndexError, TypeError, KeyError):
-            return "Error: Could not retrieve one or both papers from the knowledge base. Please verify the paper IDs."
+            
+        except (IndexError, TypeError, KeyError) as e:
+            logger.error(f"Error retrieving papers for conflict analysis: {e}", exc_info=True)
+            return FailureResponse(
+                message="Error retrieving papers from the knowledge base. Please verify the paper IDs.",
+                data={
+                    "error_type": type(e).__name__,
+                    "paper_a_id": paper_a_id, 
+                    "paper_b_id": paper_b_id, 
+                    "topic": topic
+                }
+            )
         
-        if not text_a or not text_b:
-            return "Error: Could not retrieve the full text for one or both papers."
-
-        analysis = self.extractor.find_contradictions(text_a, title_a, text_b, title_b, topic)
-        return analysis
+        # Analyze for contradictions
+        try:
+            print(f"Performing contradiction analysis on topic: {topic}")
+            analysis = self.extractor.find_contradictions(text_a, title_a, text_b, title_b, topic)
+            
+            return SuccessResponse(
+                message=f"Successfully analyzed conflicting results between '{title_a}' and '{title_b}' on topic: {topic}",
+                data={
+                    "paper_a": {"id": paper_a_id, "title": title_a},
+                    "paper_b": {"id": paper_b_id, "title": title_b},
+                    "topic": topic,
+                    "analysis": analysis
+                }
+            )
+            
+        except Exception as e:
+            logger.error(f"Error during contradiction analysis: {e}", exc_info=True)
+            return FailureResponse(
+                message=f"Error analyzing conflicting results: {str(e)}",
+                data={
+                    "error_type": type(e).__name__,
+                    "paper_a_id": paper_a_id, 
+                    "paper_b_id": paper_b_id, 
+                    "topic": topic
+                }
+            )
 
     topic: str = Field(description="The central research topic to analyze for gaps.")
     num_papers_to_analyze: int = Field(default=5, description="The number of top papers on the topic to include in the analysis.")
@@ -2044,52 +2596,117 @@ class ArchitectureDiagramTool(BaseTool):
         
         return diagram_code
 
-    def _run(self, diagram_code: str, filename: str, engine: str = "auto") -> str:
-        import os, logging, subprocess, tempfile
-        try:
-            if not filename.startswith("artifacts/"):
-                filename = f"artifacts/{filename}"
-            os.makedirs("artifacts", exist_ok=True)
+    def _run(self, diagram_code: str, filename: str, engine: str = "auto") -> Dict[str, Any]:
+        """Generate a diagram from code and save it to a file.
+        
+        Args:
+            diagram_code: The diagram code (Mermaid or Graphviz DOT format)
+            filename: The output filename
+            engine: The rendering engine to use ("auto", "mermaid", or "graphviz")
             
+        Returns:
+            Dict with success/failure status and detailed information
+        """
+        import os, logging, subprocess, tempfile
+        
+        # Validate inputs
+        if not diagram_code or not isinstance(diagram_code, str):
+            return FailureResponse(
+                message="Invalid diagram_code: Please provide valid diagram code.",
+                data={"filename": filename, "engine": engine}
+            )
+            
+        if not filename or not isinstance(filename, str):
+            return FailureResponse(
+                message="Invalid filename: Please provide a valid filename.",
+                data={"filename": filename, "engine": engine}
+            )
+        
+        try:
+            # Ensure artifacts directory exists
+            artifacts_dir = os.getenv('ARTIFACTS_DIR', 'artifacts')
+            os.makedirs(artifacts_dir, exist_ok=True)
+            
+            # Ensure filename is in artifacts directory
+            if not filename.startswith(artifacts_dir + os.sep):
+                filename = os.path.join(artifacts_dir, filename)
+            
+            # Sanitize the diagram code
             sanitized_code = self._sanitize_mermaid_code(diagram_code)
             
+            # Determine diagram type
             is_dot = sanitized_code.strip().lower().startswith("digraph") or "->" in sanitized_code or "graph" in sanitized_code.lower()
             is_mermaid = any(keyword in sanitized_code.lower() for keyword in ["graph lr", "graph td", "sequenceDiagram", "classDiagram", "stateDiagram", "erDiagram"])
-            tried_mermaid = tried_graphviz = False
             
+            print(f"Generating diagram with engine: {engine}")
+            print(f"Detected diagram types - Mermaid: {is_mermaid}, Graphviz DOT: {is_dot}")
+            
+            # Try Graphviz first if specified or if it's a DOT diagram
             if engine == "graphviz" or (engine == "auto" and is_dot and not is_mermaid):
-                tried_graphviz = True
                 try:
                     import graphviz
+                    print("Attempting Graphviz rendering")
                     dot = graphviz.Source(sanitized_code)
                     dot.format = "png"
-                    dot.render(filename=filename, cleanup=True)
-                    return f"Graphviz diagram saved to {filename}.png"
+                    output_path = dot.render(filename=filename, cleanup=True)
+                    return SuccessResponse(
+                        message=f"Graphviz diagram saved successfully",
+                        data={
+                            "output_path": output_path,
+                            "filename": filename + ".png",
+                            "engine_used": "graphviz",
+                            "diagram_type": "dot"
+                        }
+                    )
+                except ImportError:
+                    logging.warning("Graphviz library not installed")
+                    print("Graphviz library not installed, trying Mermaid")
                 except Exception as e:
                     logging.error(f"Graphviz error: {e}")
-                    tried_mermaid = True
+                    print(f"Graphviz rendering failed: {e}")
                     
-            if engine == "mermaid" or (engine == "auto" and (is_mermaid or not tried_graphviz)):
-                tried_mermaid = True
+            # Try Mermaid if specified or as fallback
+            if engine == "mermaid" or (engine == "auto" and (is_mermaid or is_dot)):
                 try:
+                    print("Attempting Mermaid rendering")
+                    # Create temporary file with diagram code
                     with tempfile.NamedTemporaryFile(mode='w', suffix='.mmd', delete=False) as tmpfile:
                         tmpfile.write(sanitized_code)
                         tmpfile_path = tmpfile.name
                     
+                    # Ensure puppeteer config exists
                     puppeteer_config_path = os.path.join(os.path.dirname(__file__), 'puppeteer-config.json')
                     if not os.path.exists(puppeteer_config_path):
                         with open(puppeteer_config_path, 'w') as f:
                             f.write('{\n  "args": ["--no-sandbox", "--disable-setuid-sandbox"]\n}')
                     
+                    # Run mermaid CLI
                     cmd = [
                         "mmdc", "-i", tmpfile_path, "-o", filename,
                         "--puppeteerConfigFile", puppeteer_config_path
                     ]
-                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    
+                    print(f"Running command: {' '.join(cmd)}")
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
                     os.remove(tmpfile_path)
                     
-                    if result.returncode != 0:
-                        logging.error(f"mmdc error: {result.stderr}")
+                    if result.returncode == 0:
+                        return SuccessResponse(
+                            message="Mermaid diagram saved successfully",
+                            data={
+                                "output_path": filename,
+                                "filename": filename,
+                                "engine_used": "mermaid",
+                                "diagram_type": "mermaid"
+                            }
+                        )
+                    else:
+                        error_msg = f"Mermaid CLI error: {result.stderr}"
+                        logging.error(error_msg)
+                        print(error_msg)
+                        
+                        # Try simplified diagram as fallback
+                        print("Trying simplified diagram as fallback")
                         simple_code = "graph LR\nA[Start] --> B[Process] --> C[End]"
                         with tempfile.NamedTemporaryFile(mode='w', suffix='.mmd', delete=False) as tmpfile2:
                             tmpfile2.write(simple_code)
@@ -2099,51 +2716,101 @@ class ArchitectureDiagramTool(BaseTool):
                             "mmdc", "-i", tmpfile_path2, "-o", filename,
                             "--puppeteerConfigFile", puppeteer_config_path
                         ]
-                        result2 = subprocess.run(cmd2, capture_output=True, text=True)
+                        result2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=60)
                         os.remove(tmpfile_path2)
                         
                         if result2.returncode == 0:
-                            return f"Mermaid diagram (simplified) saved to {filename}"
+                            return SuccessResponse(
+                                message="Mermaid diagram (simplified) saved successfully",
+                                data={
+                                    "output_path": filename,
+                                    "filename": filename,
+                                    "engine_used": "mermaid",
+                                    "diagram_type": "mermaid",
+                                    "simplified": True
+                                }
+                            )
                         else:
                             raise Exception(f"Original error: {result.stderr}. Simplified diagram also failed: {result2.stderr}")
-                    
-                    return f"Mermaid diagram saved to {filename}"
-                    
+                
                 except FileNotFoundError:
-                    return "Error: Mermaid CLI (mmdc) is not installed. Please install it with 'npm install -g @mermaid-js/mermaid-cli'."
+                    error_msg = "Mermaid CLI (mmdc) is not installed. Please install it with 'npm install -g @mermaid-js/mermaid-cli'."
+                    print(error_msg)
+                    return FailureResponse(
+                        message=error_msg,
+                        data={
+                            "filename": filename,
+                            "engine": engine,
+                            "missing_dependency": "mmdc"
+                        }
+                    )
+                except subprocess.TimeoutExpired:
+                    error_msg = "Mermaid diagram generation timed out. Please try a simpler diagram."
+                    print(error_msg)
+                    return FailureResponse(
+                        message=error_msg,
+                        data={
+                            "filename": filename,
+                            "engine": engine,
+                            "timeout": True
+                        }
+                    )
                 except Exception as e:
-                    logging.error(f"Mermaid error: {e}")
-                    # If Graphviz not tried yet, try it now
-                    if not tried_graphviz:
-                        try:
-                            import graphviz
-                            dot = graphviz.Source(sanitized_code)
-                            dot.format = "png"
-                            dot.render(filename=filename, cleanup=True)
-                            return f"Mermaid failed: {e}\nGraphviz fallback succeeded. Diagram saved to {filename}.png"
-                        except Exception as e2:
-                            # Both failed, save as Markdown
-                            md_fallback = filename.rsplit('.', 1)[0] + "_diagram.md"
-                            with open(md_fallback, 'w') as f:
-                                f.write(f"# Diagram Code (Fallback)\n\n```mermaid\n")
-                                f.write(sanitized_code)
-                                f.write("\n```")
-                            return f"Both Mermaid and Graphviz failed. Diagram code saved as Markdown to {md_fallback}. Mermaid error: {e}"
-                    else:
+                    error_msg = f"Mermaid rendering failed: {str(e)}"
+                    logging.error(error_msg)
+                    print(error_msg)
+                    
+                    # Try Graphviz as final fallback
+                    try:
+                        import graphviz
+                        print("Trying Graphviz as final fallback")
+                        dot = graphviz.Source(sanitized_code)
+                        dot.format = "png"
+                        output_path = dot.render(filename=filename, cleanup=True)
+                        return SuccessResponse(
+                            message=f"Mermaid failed but Graphviz fallback succeeded",
+                            data={
+                                "output_path": output_path,
+                                "filename": filename + ".png",
+                                "engine_used": "graphviz",
+                                "diagram_type": "dot",
+                                "original_error": str(e)
+                            }
+                        )
+                    except Exception as e2:
+                        # Both failed, save as Markdown
                         md_fallback = filename.rsplit('.', 1)[0] + "_diagram.md"
                         with open(md_fallback, 'w') as f:
                             f.write(f"# Diagram Code (Fallback)\n\n```mermaid\n")
                             f.write(sanitized_code)
                             f.write("\n```")
-                        return f"Both Mermaid and Graphviz failed. Diagram code saved as Markdown to {md_fallback}. Mermaid error: {e}"
+                        return FailureResponse(
+                            message=f"Both Mermaid and Graphviz failed. Diagram code saved as Markdown to {md_fallback}.",
+                            data={
+                                "filename": md_fallback,
+                                "engine": engine,
+                                "mermaid_error": str(e),
+                                "graphviz_error": str(e2)
+                            }
+                        )
             
-            md_fallback = filename.rsplit('.', 1)[0] + "_diagram.md"
-            with open(md_fallback, 'w') as f:
-                f.write(f"# Diagram Code (Fallback)\n\n```mermaid\n")
-                f.write(sanitized_code)
-                f.write("\n```")
-            return f"Could not render diagram. Code saved as Markdown to {md_fallback}."
+            # If we get here, no engine worked
+            return FailureResponse(
+                message="Unable to generate diagram. Please check the diagram code format and ensure either Mermaid CLI or Graphviz is installed.",
+                data={
+                    "filename": filename,
+                    "engine": engine,
+                    "diagram_code_preview": sanitized_code[:200] + "..." if len(sanitized_code) > 200 else sanitized_code
+                }
+            )
             
         except Exception as e:
-            logging.exception("ArchitectureDiagramTool failed.")
-            return f"ArchitectureDiagramTool error: {e}"
+            logger.error(f"Error in ArchitectureDiagramTool: {e}", exc_info=True)
+            return FailureResponse(
+                message=f"Error generating diagram: {str(e)}",
+                data={
+                    "filename": filename,
+                    "engine": engine,
+                    "error_type": type(e).__name__
+                }
+            )
