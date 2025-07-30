@@ -3,13 +3,9 @@ from fastapi import FastAPI, HTTPException, Request, Depends, WebSocket, WebSock
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from typing import Dict, List
+from typing import Dict
 import json
 from fastapi.websockets import WebSocketState
-from typing import Dict, List
-import json
-import asyncio
-import shutil
 from pathlib import Path
 from datetime import datetime
 from pydantic import BaseModel
@@ -244,8 +240,20 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str = None):
                     message = json.loads(data)
                     print(f"Received message from {client_id}: {message}")
                     
-                    if message.get('type') == 'new_query' and 'query' in message:
-                        query = message['query']
+                    # Handle both message formats: {"query": "..."} and {"type": "new_query", "query": "..."}
+                    if isinstance(message, dict):
+                        if 'query' in message:
+                            # Simple format: {"query": "..."}
+                            query = message['query']
+                        elif message.get('type') == 'new_query' and 'query' in message:
+                            # Wrapped format: {"type": "new_query", "query": "..."}
+                            query = message['query']
+                        else:
+                            await manager.send_message({
+                                'type': 'error',
+                                'message': 'Invalid message format: missing query field'
+                            }, client_id)
+                            continue
                         
                         # Send initial response
                         await manager.send_message({
@@ -320,80 +328,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str = None):
         print(f"WebSocket error: {e}")
         manager.disconnect(client_id)
 
-@app.websocket("/ws/{client_id}")
-async def websocket_endpoint_with_id(websocket: WebSocket, client_id: str):
-    await manager.connect(websocket, client_id)
-    try:
-        while True:
-            data = await websocket.receive_text()
-            try:
-                message = json.loads(data)
-                if message.get('type') == 'new_query':
-                    query_content = message.get('query', '')
-                    print(f"Processing query from {client_id}: {query_content}")
-                    
-                    try:
-                        # Get the MasterAgent instance (lazy loaded)
-                        agent = get_master_agent()
-                        
-                        # Send initial processing message
-                        await manager.send_message({
-                            'type': 'task_update',
-                            'status': 'in_progress',
-                            'step': {
-                                'type': 'processing',
-                                'content': 'Processing your query...'
-                            }
-                        }, client_id)
-                        
-                        # Create a callback function to send messages via WebSocket
-                        async def websocket_callback(message):
-                            try:
-                                await manager.send_message(message, client_id)
-                            except Exception as e:
-                                print(f"Error sending WebSocket message: {e}")
-                        
-                        # Run the agent with the callback
-                        final_report, thought_process = await agent.run(
-                            query_content,
-                            websocket_callback=websocket_callback
-                        )
-                        
-                        # Format the result to match expected structure
-                        result = {
-                            "final_answer": final_report,
-                            "thought_process": thought_process
-                        }
-                        
-                        if result and result.get("final_answer"):
-                            response = {
-                                'type': 'response',
-                                'content': result["final_answer"]
-                            }
-                        else:
-                            response = {
-                                'type': 'error',
-                                'content': 'Sorry, I could not process your query. Please try again.'
-                            }
-                        
-                        await manager.send_message(json.dumps(response), client_id)
-                        
-                    except Exception as e:
-                        print(f"Error processing query: {e}")
-                        error_response = {
-                            'type': 'error',
-                            'content': f'Error processing query: {str(e)}'
-                        }
-                        await manager.send_message(json.dumps(error_response), client_id)
-                        
-            except json.JSONDecodeError:
-                await manager.send_message(json.dumps({
-                    'type': 'error',
-                    'content': 'Invalid JSON format'
-                }), client_id)
-    except WebSocketDisconnect:
-        manager.disconnect(client_id)
-        print(f"Client #{client_id} disconnected")
+
 
 @app.get("/health")
 async def health_check():

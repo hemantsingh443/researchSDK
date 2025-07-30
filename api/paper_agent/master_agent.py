@@ -414,7 +414,7 @@ Based on the project state, what is the single best next action to take?
         if provider == "google":
             if not os.getenv("GOOGLE_API_KEY"):
                 raise ValueError("GOOGLE_API_KEY not found in environment variables.")
-            return ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.1)
+            return ChatGoogleGenerativeAI(model="gemini-2.0-flash-lite", temperature=0.1)
         elif provider == "local":
             return ChatOllama(model="llama3:8b-instruct-q4_K_M", temperature=0.0)
         else:
@@ -430,8 +430,8 @@ Based on the project state, what is the single best next action to take?
             A JSON string representation of the state
         """
         def default_serializer(obj):
-            if hasattr(obj, 'dict'):
-                return obj.dict()
+            if hasattr(obj, 'model_dump'):
+                return obj.model_dump()
             elif hasattr(obj, '__dict__'):
                 return obj.__dict__
             return str(obj)

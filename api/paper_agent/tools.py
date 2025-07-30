@@ -158,7 +158,7 @@ class AnswerFromPapersTool(BaseTool):
                 return FailureResponse(
                     message="Invalid question: Please provide a non-empty question.",
                     data={"sources": []}
-                ).dict()
+                ).model_dump()
             
             print(f"Answering question: '{question}' using knowledge base...")
             
@@ -169,7 +169,7 @@ class AnswerFromPapersTool(BaseTool):
                 return FailureResponse(
                     message="I could not find any relevant information in the knowledge base to answer that question. Please try rephrasing your question or add more papers to the knowledge base.",
                     data={"sources": []}
-                ).dict()
+                ).model_dump()
             
             # Format the context for the LLM
             context_str = ""
@@ -210,13 +210,13 @@ class AnswerFromPapersTool(BaseTool):
                     "answer": answer,
                     "sources": sources
                 }
-            ).dict()
+            ).model_dump()
             
         except Exception as e:
             logger.error(f"Error in AnswerFromPapersTool: {e}", exc_info=True)
             return FailureResponse(
                 message=f"An error occurred while processing your question: {str(e)}. Please try rephrasing your question or check if the knowledge base has relevant papers."
-            ).dict()
+            ).model_dump()
 
     async def _arun(self, question: str) -> str:
         """Async version of the tool (not implemented)."""
@@ -245,7 +245,7 @@ class ArxivSearchTool(BaseTool):
                 return FailureResponse(
                     message="Invalid query: Please provide a non-empty search query.",
                     data={"query": query, "max_results": max_results}
-                ).dict()
+                ).model_dump()
             
             # Ensure max_results is within reasonable bounds
             max_results = max(1, min(max_results, 10))  # Limit between 1-10 results
@@ -257,7 +257,7 @@ class ArxivSearchTool(BaseTool):
                 return FailureResponse(
                     message=f"No papers were found on arXiv for the query: '{query}'. Try using more specific search terms or check if the query is spelled correctly.",
                     data={"query": query, "max_results": max_results}
-                ).dict()
+                ).model_dump()
             
             # Add papers to the knowledge base
             print(f"Adding {len(papers)} papers to knowledge base...")
@@ -282,14 +282,14 @@ class ArxivSearchTool(BaseTool):
                     "papers": paper_details,
                     "query": query
                 }
-            ).dict()
+            ).model_dump()
             
         except Exception as e:
             logger.error(f"Error in ArxivSearchTool: {e}", exc_info=True)
             return FailureResponse(
                 message=f"An error occurred while searching arXiv: {str(e)}. Please try again with a different query or check your internet connection.",
                 data={"query": query, "max_results": max_results}
-            ).dict()
+            ).model_dump()
 
     async def _arun(self, query: str, max_results: int = 3) -> Dict[str, Any]:
         """Async version of the tool."""
@@ -321,7 +321,7 @@ class PaperSummarizationTool(BaseTool):
                 return FailureResponse(
                     message="Invalid paper_id: Please provide a valid paper ID.",
                     data={"paper_id": paper_id}
-                ).dict()
+                ).model_dump()
             
             print(f"Summarizing paper with ID: {paper_id}")
             
@@ -331,7 +331,7 @@ class PaperSummarizationTool(BaseTool):
                 return FailureResponse(
                     message=f"Could not find a paper with ID '{paper_id}' in the knowledge base. Please check the paper ID or add the paper to the knowledge base first.",
                     data={"paper_id": paper_id}
-                ).dict()
+                ).model_dump()
 
             import shutil, os
             pdf_filename = None
@@ -372,14 +372,14 @@ class PaperSummarizationTool(BaseTool):
                 return FailureResponse(
                     message=f"Could not find a paper with ID '{paper_id}' in the knowledge base. Please check the paper ID or add the paper to the knowledge base first.",
                     data={"paper_id": paper_id}
-                ).dict()
+                ).model_dump()
 
             full_text = " ".join([str(doc) for doc in documents])
             if not full_text.strip():
                 return FailureResponse(
                     message=f"Found paper with ID '{paper_id}' but it has no content to summarize.",
                     data={"paper_id": paper_id}
-                ).dict()
+                ).model_dump()
                 
             metadatas = results.get('metadatas')
             if metadatas and len(metadatas) > 0:
@@ -398,14 +398,14 @@ class PaperSummarizationTool(BaseTool):
                     "title": title,
                     "summary": summary
                 }
-            ).dict()
+            ).model_dump()
             
         except Exception as e:
             logger.error(f"Error in PaperSummarizationTool: {e}", exc_info=True)
             return FailureResponse(
                 message=f"An error occurred while summarizing the paper: {str(e)}. Please check the paper ID and try again.",
                 data={"paper_id": paper_id}
-            ).dict()
+            ).model_dump()
 
     async def _arun(self, paper_id: str) -> str:
         raise NotImplementedError("This tool does not support async yet.")
@@ -474,7 +474,7 @@ class GetPaperMetadataByTitleTool(BaseTool):
                 return FailureResponse(
                     message="Invalid query: Please provide a non-empty search query.",
                     data={"query": query, "max_results": max_results}
-                ).dict()
+                ).model_dump()
             
             # Ensure max_results is within reasonable bounds
             max_results = max(1, min(max_results, 10))  # Limit between 1-10 results
@@ -500,7 +500,7 @@ class GetPaperMetadataByTitleTool(BaseTool):
                     return FailureResponse(
                         message=f"No papers found in the knowledge base. Please add some papers first using the arxiv_paper_search_and_load tool.",
                         data={"query": query, "max_results": max_results}
-                    ).dict()
+                    ).model_dump()
                 
                 # Filter papers locally by checking if query is in title (case-insensitive)
                 query_lower = query.lower()
@@ -520,7 +520,7 @@ class GetPaperMetadataByTitleTool(BaseTool):
                     return FailureResponse(
                         message=f"No papers found matching the query: '{query}'. Try using different search terms or check if the papers have been added to the knowledge base.",
                         data={"query": query, "max_results": max_results}
-                    ).dict()
+                    ).model_dump()
                 
                 results = {'metadatas': [matching_metadatas]}
             else:
@@ -554,14 +554,14 @@ class GetPaperMetadataByTitleTool(BaseTool):
                     "papers": papers,
                     "query": query
                 }
-            ).dict()
+            ).model_dump()
             
         except Exception as e:
             logger.error(f"Error in GetPaperMetadataByTitleTool: {e}", exc_info=True)
             return FailureResponse(
                 message=f"An error occurred while searching for papers: {str(e)}. Please try again or check if the knowledge base has papers.",
                 data={"query": query, "max_results": max_results}
-            ).dict()
+            ).model_dump()
 
     async def _arun(self, query: str, max_results: int = 5) -> Dict[str, Any]:
         """Async version of the tool."""
@@ -658,7 +658,7 @@ class PaperSummarizationTool(BaseTool):
                 return FailureResponse(
                     message="Either 'paper_id' or 'title' must be provided.",
                     data={"summary_length": summary_length}
-                ).dict()
+                ).model_dump()
                 
             # Validate summary length
             if summary_length not in ["brief", "concise", "detailed"]:
@@ -681,7 +681,7 @@ class PaperSummarizationTool(BaseTool):
                 return FailureResponse(
                     message=f"Could not find paper with {paper_source} in the knowledge base.",
                     data={"paper_id": paper_id, "title": title} if paper_id else {"title": title}
-                ).dict()
+                ).model_dump()
             
             # Combine all document chunks
             full_text = "\n\n".join(doc for doc in results['documents'] if doc)
@@ -705,14 +705,14 @@ class PaperSummarizationTool(BaseTool):
                     "summary": summary,
                     "summary_length": summary_length
                 }
-            ).dict()
+            ).model_dump()
             
         except Exception as e:
             logger.error(f"Error in PaperSummarizationTool: {e}")
             return FailureResponse(
                 message=f"An error occurred while generating the summary: {str(e)}",
                 data={"paper_id": paper_id, "summary_length": summary_length}
-            ).dict()
+            ).model_dump()
 
     async def _arun(self, paper_id: Optional[str] = None, title: Optional[str] = None, summary_length: str = "concise") -> Dict[str, Any]:
         """Async version of the tool."""
@@ -761,7 +761,7 @@ class GraphQueryTool(BaseTool):
                 return SuccessResponse(
                     message="Query executed successfully but returned no results.",
                     data={"result_count": 0}
-                )
+                ).model_dump()
             
             # Process results - limit number of results to avoid huge responses
             values = [list(record.values())[0] for record in result[:self.max_results] if record]
@@ -770,7 +770,7 @@ class GraphQueryTool(BaseTool):
                 return SuccessResponse(
                     message="Query executed but did not return any values.",
                     data={"result_count": 0}
-                )
+                ).model_dump()
             
             # For large result sets, just return a summary
             if len(result) > self.max_results:
@@ -782,7 +782,7 @@ class GraphQueryTool(BaseTool):
                         "truncated": True,
                         "max_results": self.max_results
                     }
-                )
+                ).model_dump()
                 
             return SuccessResponse(
                 message=f"Query returned {len(values)} results.",
@@ -791,7 +791,7 @@ class GraphQueryTool(BaseTool):
                     "results": values,
                     "truncated": False
                 }
-            )
+            ).model_dump()
             
         except Exception as e:
             return FailureResponse(
@@ -800,7 +800,7 @@ class GraphQueryTool(BaseTool):
                     "error_type": type(e).__name__,
                     "query": query[:200] + ("..." if len(query) > 200 else "")  # Include part of query for debugging
                 }
-            )
+            ).model_dump()
 
     def __init__(self, **kwargs: Any):
         super().__init__(**kwargs)
@@ -841,13 +841,13 @@ class TableExtractionTool(BaseTool):
                 return FailureResponse(
                     message="Invalid paper_id: Please provide a valid paper ID.",
                     data={"paper_id": paper_id, "topic_of_interest": topic_of_interest}
-                )
+                ).model_dump()
                 
             if not topic_of_interest or not isinstance(topic_of_interest, str):
                 return FailureResponse(
                     message="Invalid topic_of_interest: Please provide a valid topic.",
                     data={"paper_id": paper_id, "topic_of_interest": topic_of_interest}
-                )
+                ).model_dump()
             
             print(f"Extracting table about '{topic_of_interest}' from paper ID: {paper_id}")
             
@@ -857,7 +857,7 @@ class TableExtractionTool(BaseTool):
                 return FailureResponse(
                     message=f"Could not find paper with ID '{paper_id}' in the knowledge base. Please check the paper ID or add the paper to the knowledge base first.",
                     data={"paper_id": paper_id}
-                )
+                ).model_dump()
             
             # Get paper metadata
             full_text = " ".join([str(doc) for doc in results['documents']])
@@ -865,7 +865,7 @@ class TableExtractionTool(BaseTool):
                 return FailureResponse(
                     message=f"Found paper with ID '{paper_id}' but it has no text content to extract tables from.",
                     data={"paper_id": paper_id}
-                )
+                ).model_dump()
                 
             metadatas = results.get('metadatas', [{}])
             title = str(metadatas[0].get('title', 'Unknown Title'))
@@ -895,7 +895,7 @@ class TableExtractionTool(BaseTool):
                                 "title": title,
                                 "extraction_method": "llm"
                             }
-                        )
+                        ).model_dump()
                     else:
                         print("LLM extraction returned empty table data")
                 else:
@@ -930,7 +930,7 @@ class TableExtractionTool(BaseTool):
                             return SuccessResponse(
                                 message=f"Extracted table from PDF using Camelot: {title}",
                                 data=table_data
-                            )
+                            ).model_dump()
                         else:
                             print("PDF extraction returned empty table")
                     else:
@@ -945,14 +945,14 @@ class TableExtractionTool(BaseTool):
             return FailureResponse(
                 message=f"Could not extract table about '{topic_of_interest}' from paper: {title}. Both LLM-based and PDF-based extraction methods failed. Please try a different topic or check if the paper contains tables.",
                 data={"paper_id": paper_id, "title": title}
-            )
+            ).model_dump()
             
         except Exception as e:
             logger.error(f"Error in TableExtractionTool: {e}", exc_info=True)
             return FailureResponse(
                 message=f"Error extracting table: {str(e)}. Please check the paper ID and try again.",
                 data={"paper_id": paper_id, "error_type": type(e).__name__}
-            )
+            ).model_dump()
     
     def _find_pdf_path(self, paper_id: str) -> Optional[str]:
         """Helper to find PDF path from paper ID."""
@@ -1013,7 +1013,7 @@ class RelationshipAnalysisTool(BaseTool):
                 return FailureResponse(
                     message="Could not find one or both papers in the knowledge graph.",
                     data={"paper_a_query": paper_a_title, "paper_b_query": paper_b_title}
-                )
+                ).model_dump()
                 
             paper_a = result[0]['a']
             paper_b = result[0]['b']
@@ -1034,7 +1034,7 @@ class RelationshipAnalysisTool(BaseTool):
                         "paper_b": paper_b['title'],
                         "relationship_found": False
                     }
-                )
+                ).model_dump()
             
             # Format the path for display and analysis
             path = path_result[0]['path']
@@ -1053,7 +1053,7 @@ class RelationshipAnalysisTool(BaseTool):
                     "path_description": path_description,
                     "explanation": explanation
                 }
-            )
+            ).model_dump()
             
         except Exception as e:
             return FailureResponse(
@@ -1063,7 +1063,7 @@ class RelationshipAnalysisTool(BaseTool):
                     "paper_a_query": paper_a_title,
                     "paper_b_query": paper_b_title
                 }
-            )
+            ).model_dump()
 
 class CitationAnalysisInput(BaseModel):
     analysis_type: str = Field(description="The type of citation analysis to perform. Options: 'most_cited', 'hottest_papers'.")
@@ -1923,7 +1923,7 @@ class DynamicVisualizationTool(BaseTool):
                 return FailureResponse(
                     message="Plot generation completed but file was not found",
                     data={"expected_path": os.path.abspath(filename)}
-                )
+                ).model_dump()
                 
             return SuccessResponse(
                 message=f"Successfully generated visualization: {filename}",
@@ -1933,18 +1933,18 @@ class DynamicVisualizationTool(BaseTool):
                     "analysis_goal": analysis_goal,
                     "chart_type": chart_type or "auto-detected"
                 }
-            )
+            ).model_dump()
             
         except json.JSONDecodeError as e:
             return FailureResponse(
                 message="Invalid JSON data provided",
                 data={"error": str(e)}
-            )
+            ).model_dump()
         except Exception as e:
             return FailureResponse(
                 message=f"Error generating visualization: {str(e)}",
                 data={"error_type": type(e).__name__}
-            )
+            ).model_dump()
 
     def _generate_plotting_code(self, df_head: str, analysis_goal: str, chart_type: str | None = None) -> str:
         """Uses an LLM to write robust, safe Python code to generate a plot."""
@@ -2550,7 +2550,7 @@ class DataToCsvTool(BaseTool):
                 return FailureResponse(
                     message="CSV file was not created successfully",
                     data={"expected_path": filepath}
-                )
+                ).model_dump()
                 
             # Create a web-accessible URL for the file
             web_path = f"/artifacts/{filename}"
@@ -2565,7 +2565,7 @@ class DataToCsvTool(BaseTool):
                     "columns": list(df.columns),
                     "file_size_bytes": os.path.getsize(filepath)
                 }
-            )
+            ).model_dump()
             
         except json.JSONDecodeError as e:
             return FailureResponse(
@@ -2576,12 +2576,12 @@ class DataToCsvTool(BaseTool):
             return FailureResponse(
                 message="Permission denied when trying to write CSV file",
                 data={"error": str(e), "filename": filename}
-            )
+            ).model_dump()
         except Exception as e:
             return FailureResponse(
                 message=f"Error saving to CSV: {str(e)}",
                 data={"error_type": type(e).__name__, "filename": filename}
-            )
+            ).model_dump()
 
     async def _arun(self, json_data: str, filename: str) -> str:
         raise NotImplementedError("This tool does not support async yet.")
